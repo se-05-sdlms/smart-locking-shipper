@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+}
+
+body {
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input {
+  touch-action: manipulation;
+}
+
+@supports (padding: env(safe-area-inset-bottom)) {
+  .safe-bottom {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+
+  .safe-top {
+    padding-top: max(0.75rem, env(safe-area-inset-top));
+  }
+}
+
+@keyframes welcome-rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+}
+
+.welcome-brand {
+  animation: welcome-rise 650ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.welcome-actions {
+  animation: welcome-rise 650ms 120ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-brand,
+  .welcome-actions {
+    animation: none;
+  }
+}
