@@ -12,6 +12,44 @@ export type DeliverySummary = {
   sessionExpiresAt: string;
 };
 
+export type GuestDeliveryStatus = {
+  requestId: string;
+  status: "Started" | "PendingApproval" | "Approved" | "Allocated" | "Deposited" | "Rejected" | "Expired" | "Cancelled" | "Failed";
+  approvalExpiresAt: string | null;
+  compartmentCode: string | null;
+  reservationExpiresAt: string | null;
+  parcelId: string | null;
+  failureCode: string | null;
+  failureDetail: string | null;
+};
+
+export type CompartmentReservation = {
+  requestId: string;
+  reservationId: string;
+  compartmentId: string;
+  compartmentCode: string;
+  reservedAt: string;
+  reservationExpiresAt: string;
+};
+
+export type DropOffConfirmation = {
+  requestId: string;
+  parcelId: string;
+  status: number;
+  depositedAt: string;
+};
+
+export type ReturnPickupSession = {
+  returnRequestId: string;
+  guestSessionToken: string;
+  lockerCode: string;
+  compartmentCode: string;
+  imageUrl: string;
+  expiresAt: string;
+};
+
+export type ReturnPickupComplete = { returnRequestId: string; status: number; compartmentCode: string };
+
 export class DeliveryApiError extends Error {
   constructor(
     message: string,
@@ -80,4 +118,37 @@ export const submitRecipient = (
       "X-Guest-Session-Token": guestSessionToken,
     },
     body: JSON.stringify({ recipientPhone }),
+  });
+
+export const getDeliveryStatus = (requestId: string, guestSessionToken: string) =>
+  request<GuestDeliveryStatus>(`/backend/delivery-requests/${requestId}/status`, {
+    method: "GET",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+  });
+
+export const reserveCompartment = (requestId: string, guestSessionToken: string) =>
+  request<CompartmentReservation>(`/backend/delivery-requests/${requestId}/reserve-compartment`, {
+    method: "POST",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+  });
+
+export const confirmDropOff = (requestId: string, guestSessionToken: string) =>
+  request<DropOffConfirmation>(`/backend/delivery-requests/${requestId}/confirm-drop-off`, {
+    method: "POST",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+  });
+
+export const validateReturnPickup = (lockerCode: string, pickupCode: string) =>
+  request<ReturnPickupSession>("/backend/return-pickups/validate", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lockerCode, pickupCode }),
+  });
+
+export const openReturnPickup = (session: ReturnPickupSession) =>
+  request<ReturnPickupSession>(`/backend/return-pickups/${session.returnRequestId}/open`, {
+    method: "POST", headers: { "X-Guest-Session-Token": session.guestSessionToken },
+  });
+
+export const confirmReturnPickup = (session: ReturnPickupSession) =>
+  request<ReturnPickupComplete>(`/backend/return-pickups/${session.returnRequestId}/confirm`, {
+    method: "POST", headers: { "X-Guest-Session-Token": session.guestSessionToken },
   });

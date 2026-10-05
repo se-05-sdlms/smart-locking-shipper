@@ -39,12 +39,18 @@ import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import {
   attachParcelImage,
+  confirmDropOff,
+  confirmReturnPickup,
   DeliveryApiError,
+  getDeliveryStatus,
   initiateDelivery,
+  openReturnPickup,
+  reserveCompartment,
   submitRecipient,
   uploadParcelFile,
+  validateReturnPickup,
 } from "./delivery-api";
-import type { DeliverySession } from "./delivery-api";
+import type { DeliverySession, ReturnPickupSession } from "./delivery-api";
 
 type Screen =
   | "welcome"
@@ -67,14 +73,13 @@ type Screen =
   | "full"
   | "door-timeout";
 
-const MOCK_OTP = "A7K2M9";
 const APPROVAL_DURATION_SECONDS = 10 * 60;
 
 const formatTime = (seconds: number) =>
   `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 
 const normalizePickupCode = (value: string) =>
-  value.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 6);
+  value.replace(/\D/g, "").slice(0, 6);
 
 function ApprovalCountdown({ seconds }: { seconds: number }) {
   const radius = 112;
@@ -477,6 +482,8 @@ export function DeliveryFlow() {
   const [phoneError, setPhoneError] = useState("");
   const [apiError, setApiError] = useState("");
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
+  const [compartmentCode, setCompartmentCode] = useState("");
+  const [parcelId, setParcelId] = useState("");
   const [approvalDeadline, setApprovalDeadline] = useState<number | null>(null);
   const [approvalSeconds, setApprovalSeconds] = useState(APPROVAL_DURATION_SECONDS);
   const [isStartingDelivery, setIsStartingDelivery] = useState(false);
@@ -489,7 +496,7 @@ export function DeliveryFlow() {
   const [doorSeconds, setDoorSeconds] = useState(298);
   const [checkingDoor, setCheckingDoor] = useState(false);
   const [openingDoor, setOpeningDoor] = useState(false);
-  const [failNextPickupOpen, setFailNextPickupOpen] = useState(false);
+  const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -501,7 +508,6 @@ export function DeliveryFlow() {
     const timer = window.setTimeout(() => {
       if (scannedLockerCode) setLockerCode(scannedLockerCode);
       if (previewPhone) setPhone(formatPhone(previewPhone));
-      if (searchParams.get("pickupOpen") === "fail") setFailNextPickupOpen(true);
       if (preview === "waiting") {
         setApprovalDeadline(Date.now() + APPROVAL_DURATION_SECONDS * 1000);
         setApprovalSeconds(APPROVAL_DURATION_SECONDS);
@@ -518,10 +524,53 @@ export function DeliveryFlow() {
   }, [screen, doorSeconds]);
 
   useEffect(() => {
-    if (screen !== "searching") return;
-    const timer = window.setTimeout(() => setScreen("compartment"), 1400);
-    return () => window.clearTimeout(timer);
-  }, [screen]);
+    if (screen !== "waiting" || !deliverySession) return;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      try {
+        const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
+        if (cancelled) return;
+        if (status.approvalExpiresAt) {
+          const deadline = new Date(status.approvalExpiresAt).getTime();
+          setApprovalDeadline(deadline);
+          setApprovalSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+        }
+        if (status.status === "Approved") {
+          const reservation = await reserveCompartment(deliverySession.id, deliverySession.guestSessionToken);
+          if (cancelled) return;
+          setCompartmentCode(reservation.compartmentCode);
+          setScreen("compartment");
+          return;
+        }
+        if (status.status === "Allocated" && status.compartmentCode) {
+          setCompartmentCode(status.compartmentCode);
+          setScreen("compartment");
+          return;
+        }
+        if (status.status === "Deposited") {
+          setParcelId(status.parcelId ?? "");
+          setScreen("success");
+          return;
+        }
+        if (status.status === "Rejected") return setScreen("rejected");
+        if (status.status === "Expired" || status.status === "Cancelled") return setScreen("expired");
+        if (status.status === "Failed") return setScreen(status.failureCode === "NoCompartment" ? "full" : "door-timeout");
+        timer = window.setTimeout(poll, 2000);
+      } catch (error) {
+        if (cancelled) return;
+        setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu.");
+        timer = window.setTimeout(poll, 3000);
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [deliverySession, screen]);
 
   useEffect(() => {
     if (screen !== "waiting" || !approvalDeadline) return;
@@ -549,6 +598,8 @@ export function DeliveryFlow() {
     setPhoneError("");
     setApiError("");
     setDeliverySession(null);
+    setCompartmentCode("");
+    setParcelId("");
     setApprovalDeadline(null);
     setApprovalSeconds(APPROVAL_DURATION_SECONDS);
     setIsStartingDelivery(false);
@@ -561,30 +612,38 @@ export function DeliveryFlow() {
     setDoorSeconds(298);
     setCheckingDoor(false);
     setOpeningDoor(false);
-    setFailNextPickupOpen(false);
+    setPickupSession(null);
   };
 
-  const verifyPickupCode = () => {
-    if (otp !== MOCK_OTP) {
-      setOtpError("Mã lấy hàng không đúng. Vui lòng kiểm tra và nhập lại.");
-      return;
-    }
-
+  const verifyPickupCode = async () => {
     setOtpError("");
-    setScreen("receive-details");
+    try {
+      const session = await validateReturnPickup(lockerCode, otp);
+      setPickupSession(session);
+      setScreen("receive-details");
+    } catch (error) {
+      setOtpError(error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
+    }
   };
 
-  const openPickupCompartment = () => {
+  const openPickupCompartment = async () => {
+    if (!pickupSession) return;
     setOpeningDoor(true);
-    window.setTimeout(() => {
-      setOpeningDoor(false);
-      if (failNextPickupOpen) {
-        setFailNextPickupOpen(false);
-        setScreen("receive-open-failed");
-        return;
-      }
+    try {
+      setPickupSession(await openReturnPickup(pickupSession));
       setScreen("receive-opened");
-    }, 1300);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Không thể mở ngăn tủ.");
+      setScreen("receive-open-failed");
+    } finally { setOpeningDoor(false); }
+  };
+
+  const completePickup = async () => {
+    if (!pickupSession) return;
+    setOpeningDoor(true); setApiError("");
+    try { await confirmReturnPickup(pickupSession); reset(); }
+    catch (error) { setApiError(error instanceof Error ? error.message : "Chưa thể xác nhận cửa đã đóng."); }
+    finally { setOpeningDoor(false); }
   };
 
   const searchRecipient = () => {
@@ -668,12 +727,19 @@ export function DeliveryFlow() {
     }
   };
 
-  const verifyDoor = () => {
+  const verifyDoor = async () => {
+    if (!deliverySession) return;
     setCheckingDoor(true);
-    window.setTimeout(() => {
+    setApiError("");
+    try {
+      const result = await confirmDropOff(deliverySession.id, deliverySession.guestSessionToken);
+      setParcelId(result.parcelId);
       setCheckingDoor(false);
       setScreen("success");
-    }, 1100);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Chưa thể xác nhận cửa đã đóng.");
+      setCheckingDoor(false);
+    }
   };
 
   const goBack = () => {
@@ -790,9 +856,6 @@ export function DeliveryFlow() {
                 />
               </div>
 
-              <p className="mb-3 text-center text-xs text-muted">
-                Mã dùng thử: <span className="font-mono font-bold tracking-[0.14em] text-[#f55a12]">{MOCK_OTP}</span>
-              </p>
               <Button
                 fullWidth
                 isDisabled={otp.length !== 6}
@@ -823,16 +886,10 @@ export function DeliveryFlow() {
 
             <Card className="relative mt-6 min-h-[22rem] overflow-hidden rounded-[1.7rem] border border-[#f2e8e1] bg-white p-0 shadow-[0_18px_48px_rgba(92,40,11,.12)]">
               <div aria-hidden="true" className="absolute inset-y-0 right-0 w-[58%] [mask-image:linear-gradient(to_right,transparent_0%,black_45%)]">
-                <Image
-                  alt=""
-                  className="object-cover object-center"
-                  fill
-                  sizes="(max-width: 640px) 62vw, 300px"
-                  src="/illustrations/pickup-locker.png"
-                />
+                {pickupSession ? <img alt="Ảnh kiện hàng cư dân gửi" className="size-full object-cover object-center" src={pickupSession.imageUrl} /> : null}
                 <div className="absolute inset-0 bg-linear-to-b from-white/45 via-transparent to-white/20" />
                 <Chip className="absolute right-5 top-[47%] border border-white/60 bg-[#ff6a1a] font-bold text-white shadow-lg" size="sm">
-                  N06
+                  {pickupSession?.compartmentCode}
                 </Chip>
               </div>
 
@@ -840,7 +897,7 @@ export function DeliveryFlow() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium text-[#697386]">Ngăn tủ</p>
-                    <p className="mt-1 text-[4.7rem] font-black leading-none tracking-[-0.08em] text-[#ff5b16]">N06</p>
+                    <p className="mt-1 text-[4.7rem] font-black leading-none tracking-[-0.08em] text-[#ff5b16]">{pickupSession?.compartmentCode}</p>
                   </div>
                   <Chip className="shrink-0" color="success" size="sm" variant="soft">
                     <CircleCheckFill className="size-4" /> Đã xác thực
@@ -849,7 +906,7 @@ export function DeliveryFlow() {
 
                 <div className="mt-4 flex items-center gap-2 text-sm font-medium text-[#697386]">
                   <MapPin className="size-5 shrink-0 text-[#ff5b16]" />
-                  <span>Tủ Boxora Nguyễn Huệ · LK-01</span>
+                  <span>Tủ Boxora · {pickupSession?.lockerCode ?? lockerCode}</span>
                 </div>
 
                 <div className="mt-5 h-px bg-[#eee7e1]" />
@@ -859,9 +916,9 @@ export function DeliveryFlow() {
                     <Avatar.Fallback className="bg-[#fff0e5] text-lg font-bold text-[#ff5b16]">NH</Avatar.Fallback>
                   </Avatar>
                   <div className="min-w-0">
-                    <p className="text-sm text-[#697386]">Người gửi trả</p>
-                    <p className="truncate text-lg font-bold text-[#171717]">Nguyễn Thị Hằng</p>
-                    <p className="text-base text-[#697386]">0901 *** 567</p>
+                    <p className="text-sm text-[#697386]">Kiện hàng gửi qua tủ</p>
+                    <p className="truncate text-lg font-bold text-[#171717]">Ảnh đã được cư dân xác nhận</p>
+                    <p className="text-base text-[#697386]">Chỉ mở đúng ngăn được hệ thống chỉ định</p>
                   </div>
                 </div>
               </Card.Content>
@@ -875,7 +932,7 @@ export function DeliveryFlow() {
                 size="lg"
                 onPress={openPickupCompartment}
               >
-                {openingDoor ? <><Spinner color="current" size="sm" /> Đang mở ngăn...</> : <><LockOpen className="size-7" /> Mở ngăn N06</>}
+                {openingDoor ? <><Spinner color="current" size="sm" /> Đang mở ngăn...</> : <><LockOpen className="size-7" /> Mở ngăn {pickupSession?.compartmentCode}</>}
               </Button>
             </div>
           </div>
@@ -888,7 +945,7 @@ export function DeliveryFlow() {
               <span className="mx-auto flex size-20 items-center justify-center rounded-full bg-[#eaf9ef] text-[#20a555] shadow-[0_12px_32px_rgba(32,165,85,.14)]">
                 <CircleCheckFill className="size-11" />
               </span>
-              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Ngăn N06 đã mở</h1>
+              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Ngăn {pickupSession?.compartmentCode} đã mở</h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
                 Lấy kiện hàng ra khỏi ngăn và đóng cửa tủ sau khi hoàn tất.
               </p>
@@ -897,17 +954,10 @@ export function DeliveryFlow() {
             <Card className="mt-6 overflow-hidden rounded-[1.7rem] border border-[#f2e8e1] bg-white p-0 shadow-[0_18px_48px_rgba(92,40,11,.12)]">
               <Card.Content className="p-0">
                 <div className="relative aspect-[16/9] overflow-hidden bg-[#fff7ef]">
-                  <Image
-                    alt="Ngăn N06 đang mở với kiện hàng bên trong"
-                    className="object-cover object-center"
-                    fill
-                    priority
-                    sizes="(max-width: 640px) calc(100vw - 40px), 456px"
-                    src="/illustrations/pickup-locker.png"
-                  />
+                  {pickupSession ? <img alt="Ảnh kiện hàng cần lấy" className="size-full object-cover object-center" src={pickupSession.imageUrl} /> : null}
                   <div className="absolute inset-0 bg-linear-to-t from-[#3b1b08]/30 via-transparent to-white/10" />
                   <Chip className="absolute right-4 top-4 border border-white/60 bg-[#ff6a1a] font-bold text-white shadow-lg" size="sm">
-                    N06 · Đang mở
+                    {pickupSession?.compartmentCode} · Đang mở
                   </Chip>
                 </div>
                 <div className="grid grid-cols-2 divide-x divide-[#eee7e1] px-2 py-4 text-center">
@@ -917,7 +967,7 @@ export function DeliveryFlow() {
                   </div>
                   <div>
                     <p className="text-xs text-[#697386]">Ngăn lấy hàng</p>
-                    <p className="mt-1 font-bold text-[#ff5b16]">N06</p>
+                    <p className="mt-1 font-bold text-[#ff5b16]">{pickupSession?.compartmentCode}</p>
                   </div>
                 </div>
               </Card.Content>
@@ -937,9 +987,10 @@ export function DeliveryFlow() {
                 fullWidth
                 className="h-16 rounded-[1.4rem] bg-[#ff5b16] text-lg font-bold text-white shadow-[0_16px_34px_rgba(255,91,22,.25)]"
                 size="lg"
-                onPress={reset}
+                isPending={openingDoor}
+                onPress={completePickup}
               >
-                <Check className="size-6" /> Hoàn tất lấy hàng
+                 <Check className="size-6" /> Tôi đã lấy hàng và đóng cửa
               </Button>
             </div>
           </div>
@@ -953,7 +1004,7 @@ export function DeliveryFlow() {
                 <TriangleExclamation className="size-10" />
               </span>
               <h1 className="mt-5 text-[2rem] font-extrabold leading-tight tracking-[-0.05em] text-[#171717]">
-                Không thể mở ngăn N06
+                 Không thể mở ngăn {pickupSession?.compartmentCode}
               </h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
                 Tủ chưa phản hồi yêu cầu mở ngăn. Kiện hàng vẫn đang được khóa an toàn.
@@ -968,7 +1019,7 @@ export function DeliveryFlow() {
                   </span>
                   <div>
                     <p className="font-bold text-[#171717]">Cửa ngăn vẫn đang đóng</p>
-                    <p className="text-sm text-[#697386]">Tủ {lockerCode} · Ngăn N06</p>
+                    <p className="text-sm text-[#697386]">Tủ {lockerCode} · Ngăn {pickupSession?.compartmentCode}</p>
                   </div>
                 </div>
                 <div className="h-px bg-[#eee7e1]" />
@@ -1253,7 +1304,7 @@ export function DeliveryFlow() {
           <div className="flex flex-1 flex-col items-center justify-center text-center">
             <Spinner size="xl" />
             <h1 className="mt-6 text-2xl font-semibold tracking-tight">Đang tìm ngăn trống</h1>
-            <p className="mt-2 max-w-xs text-sm leading-6 text-muted">Hệ thống đang kiểm tra các ngăn khả dụng tại Locker LK-01.</p>
+            <p className="mt-2 max-w-xs text-sm leading-6 text-muted">Hệ thống đang kiểm tra các ngăn khả dụng tại Locker {lockerCode}.</p>
           </div>
         );
 
@@ -1263,7 +1314,7 @@ export function DeliveryFlow() {
             <StatusScreen
               tone="success"
               icon={<CircleCheckFill className="size-11" />}
-              title="Ngăn N06 đã sẵn sàng"
+              title={`Ngăn ${compartmentCode} đã sẵn sàng`}
               description="Cửa ngăn đã mở. Hãy đặt kiện hàng vào ngăn rồi đóng cửa."
             >
               <Card variant="secondary">
@@ -1271,11 +1322,11 @@ export function DeliveryFlow() {
                   <div className="grid grid-cols-2 divide-x divide-border text-center">
                     <div className="py-1">
                       <p className="text-xs text-muted">Locker</p>
-                      <p className="mt-1 text-lg font-semibold">LK-01</p>
+                      <p className="mt-1 text-lg font-semibold">{lockerCode}</p>
                     </div>
                     <div className="py-1">
                       <p className="text-xs text-muted">Ngăn</p>
-                      <p className="mt-1 text-lg font-semibold">N06</p>
+                      <p className="mt-1 text-lg font-semibold">{compartmentCode}</p>
                     </div>
                   </div>
                   <div className="h-px bg-border" />
@@ -1283,7 +1334,7 @@ export function DeliveryFlow() {
                     <CircleCheckFill className="size-6 shrink-0 text-success" />
                     <div>
                       <p className="font-semibold">Cửa đã mở</p>
-                      <p className="text-sm text-muted">Đặt kiện hàng vào ngăn N06</p>
+                      <p className="text-sm text-muted">Đặt kiện hàng vào ngăn {compartmentCode}</p>
                     </div>
                   </div>
                 </Card.Content>
@@ -1299,7 +1350,7 @@ export function DeliveryFlow() {
             <PageIntro
               icon={<TriangleExclamation className="size-7" />}
               title="Hãy đóng cửa ngăn"
-              description="Hệ thống chỉ hoàn tất khi phần cứng xác nhận cửa N06 đã đóng."
+              description={`Hệ thống chỉ hoàn tất khi phần cứng xác nhận cửa ${compartmentCode} đã đóng.`}
             />
             <Card variant="secondary">
               <Card.Content className="space-y-5">
@@ -1318,6 +1369,7 @@ export function DeliveryFlow() {
               </Card.Content>
             </Card>
             <p className="mt-4 text-center text-xs leading-5 text-muted">Nút bên dưới chỉ yêu cầu hệ thống kiểm tra; trạng thái cảm biến cửa mới là xác nhận cuối cùng.</p>
+            {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
             <div className="pt-5">
               <Button fullWidth isPending={checkingDoor} size="lg" onPress={verifyDoor}>
                 {checkingDoor ? <><Spinner color="current" size="sm" /> Đang kiểm tra cửa...</> : "Tôi đã đóng cửa"}
@@ -1332,15 +1384,15 @@ export function DeliveryFlow() {
             tone="success"
             icon={<CircleCheckFill className="size-12" />}
             title="Gửi hàng thành công"
-            description="Kiện hàng đã được lưu tại Locker LK-01 và người nhận đã được thông báo."
+            description={`Kiện hàng đã được lưu tại Locker ${lockerCode} và người nhận đã được thông báo.`}
           >
             <Card>
               <Card.Header>
                 <Card.Title className="flex items-center gap-2"><Receipt className="size-5" /> Biên nhận gửi hàng</Card.Title>
-                <Card.Description>PRC-20260920-0182</Card.Description>
+                <Card.Description>{parcelId || "Đã tạo kiện hàng"}</Card.Description>
               </Card.Header>
               <Card.Content className="space-y-3 text-sm">
-                {[['Locker', 'LK-01'], ['Ngăn', 'N06'], ['Người nhận', 'Nguyễn Thị H. · 0901 *** 567'], ['Thời gian', '20/09/2026 · 23:42']].map(([label, value]) => (
+                {[["Locker", lockerCode], ["Ngăn", compartmentCode], ["Người nhận", formatPhone(phone)], ["Trạng thái", "Đã lưu an toàn"]].map(([label, value]) => (
                   <div className="flex justify-between gap-4 border-b border-border pb-3 last:border-0 last:pb-0" key={label}>
                     <span className="text-muted">{label}</span><span className="text-right font-medium">{value}</span>
                   </div>
