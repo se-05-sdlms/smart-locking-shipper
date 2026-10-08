@@ -38,15 +38,12 @@ import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import {
-  attachParcelImage,
-  confirmDropOff,
-  confirmReturnPickup,
   DeliveryApiError,
   getDeliveryStatus,
   initiateDelivery,
   openReturnPickup,
   reserveCompartment,
-  submitRecipient,
+  submitDelivery,
   uploadParcelFile,
   validateReturnPickup,
 } from "./delivery-api";
@@ -638,12 +635,9 @@ export function DeliveryFlow() {
     } finally { setOpeningDoor(false); }
   };
 
-  const completePickup = async () => {
+  const completePickup = () => {
     if (!pickupSession) return;
-    setOpeningDoor(true); setApiError("");
-    try { await confirmReturnPickup(pickupSession); reset(); }
-    catch (error) { setApiError(error instanceof Error ? error.message : "Chưa thể xác nhận cửa đã đóng."); }
-    finally { setOpeningDoor(false); }
+    reset();
   };
 
   const searchRecipient = () => {
@@ -707,10 +701,10 @@ export function DeliveryFlow() {
     setIsSendingRequest(true);
     try {
       const parcelImageUrl = await uploadParcelFile(imageFile);
-      await attachParcelImage(deliverySession.id, deliverySession.guestSessionToken, parcelImageUrl);
-      await submitRecipient(
+      await submitDelivery(
         deliverySession.id,
         deliverySession.guestSessionToken,
+        parcelImageUrl,
         phoneDigits(phone),
       );
       setApprovalDeadline(Date.now() + APPROVAL_DURATION_SECONDS * 1000);
@@ -732,12 +726,15 @@ export function DeliveryFlow() {
     setCheckingDoor(true);
     setApiError("");
     try {
-      const result = await confirmDropOff(deliverySession.id, deliverySession.guestSessionToken);
-      setParcelId(result.parcelId);
-      setCheckingDoor(false);
+      const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
+      if (status.status !== "Deposited") {
+        throw new Error("Hệ thống chưa ghi nhận cửa đã đóng. Vui lòng chờ vài giây rồi thử lại.");
+      }
+      setParcelId(status.parcelId ?? "");
       setScreen("success");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Chưa thể xác nhận cửa đã đóng.");
+    } finally {
       setCheckingDoor(false);
     }
   };
