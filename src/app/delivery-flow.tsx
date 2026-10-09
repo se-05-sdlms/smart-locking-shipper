@@ -523,12 +523,22 @@ export function DeliveryFlow() {
   useEffect(() => {
     if (screen !== "waiting" || !deliverySession) return;
     let cancelled = false;
+    let inFlight = false;
     let timer: number | undefined;
 
     const poll = async () => {
+      if (
+        cancelled ||
+        inFlight ||
+        document.visibilityState !== "visible" ||
+        !navigator.onLine
+      )
+        return;
+      inFlight = true;
       try {
         const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
         if (cancelled) return;
+        setApiError("");
         if (status.approvalExpiresAt) {
           const deadline = new Date(status.approvalExpiresAt).getTime();
           setApprovalDeadline(deadline);
@@ -559,13 +569,26 @@ export function DeliveryFlow() {
         if (cancelled) return;
         setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu.");
         timer = window.setTimeout(poll, 3000);
+      } finally {
+        inFlight = false;
       }
     };
 
+    const resumePolling = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (timer) window.clearTimeout(timer);
+      timer = undefined;
+      void poll();
+    };
+
     void poll();
+    document.addEventListener("visibilitychange", resumePolling);
+    window.addEventListener("online", resumePolling);
     return () => {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", resumePolling);
+      window.removeEventListener("online", resumePolling);
     };
   }, [deliverySession, screen]);
 
