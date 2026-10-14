@@ -56,7 +56,7 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
 
   if (!response.ok) {
     throw new DeliveryApiError(
-      payload?.message ?? "Không thể kết nối với hệ thống. Vui lòng thử lại.",
+      payload?.message ?? payload?.detail ?? payload?.title ?? "Không thể kết nối với hệ thống. Vui lòng thử lại.",
       response.status,
     );
   }
@@ -75,7 +75,7 @@ export async function uploadParcelFile(file: File): Promise<string> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const result = await request<{ url: string }>("/api/parcel-images", {
+  const result = await request<{ url: string }>("/backend/images", {
     method: "POST",
     body: formData,
   });
@@ -118,4 +118,9 @@ export const validateReturnPickup = (lockerCode: string, pickupCode: string) =>
 export const openReturnPickup = (session: ReturnPickupSession) =>
   request<ReturnPickupSession>(`/backend/return-pickup-sessions/${session.returnRequestId}:openCompartment`, {
     method: "POST", headers: { "X-Guest-Session-Token": session.guestSessionToken },
+  });
+
+export const getReturnPickup = (session: ReturnPickupSession) =>
+  request<ReturnPickupSession>(`/backend/return-pickup-sessions/${session.returnRequestId}`, {
+    method: "GET", headers: { "X-Guest-Session-Token": session.guestSessionToken },
   });

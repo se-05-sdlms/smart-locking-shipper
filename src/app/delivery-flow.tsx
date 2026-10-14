@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Avatar,
   Button,
   Card,
   Chip,
@@ -11,7 +10,7 @@ import {
   InputOTP,
   Label,
   Link,
-  REGEXP_ONLY_DIGITS_AND_CHARS,
+  REGEXP_ONLY_DIGITS,
   Spinner,
   TextField,
 } from "@heroui/react";
@@ -29,7 +28,6 @@ import {
   Lock,
   LockOpen,
   MapPin,
-  Person,
   Receipt,
   TriangleExclamation,
   Xmark,
@@ -40,6 +38,7 @@ import type { ChangeEvent, PointerEvent as ReactPointerEvent, ReactNode } from "
 import {
   DeliveryApiError,
   getDeliveryStatus,
+  getReturnPickup,
   initiateDelivery,
   openReturnPickup,
   reserveCompartment,
@@ -56,6 +55,7 @@ type Screen =
   | "receive-details"
   | "receive-open-failed"
   | "receive-opened"
+  | "receive-success"
   | "recipient"
   | "parcel"
   | "confirm"
@@ -179,10 +179,7 @@ function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisab
         <Image alt="Logo Boxora" className="shrink-0" height={44} priority src="/boxora-logo.svg" width={44} />
         <div className="min-w-0">
           <p className="truncate text-[1.35rem] font-extrabold leading-6 tracking-[-0.035em] text-[#f55a12]">BOXORA</p>
-          <p className="flex items-center gap-2 truncate text-sm font-medium text-[#697386]">
-            <span className="truncate">Tủ {lockerCode} · Nguyễn Huệ</span>
-            <span aria-label="Đang hoạt động" className="size-2.5 shrink-0 rounded-full bg-[#21c75b] shadow-[0_0_0_3px_rgba(33,199,91,.1)]" role="img" />
-          </p>
+          <p className="truncate text-sm font-medium text-[#697386]">Tủ {lockerCode}</p>
         </div>
       </div>
     </header>
@@ -209,21 +206,17 @@ function LockerCard({ lockerCode }: { lockerCode: string }) {
           <Box className="size-6" />
         </div>
         <div className="min-w-0 flex-1">
-          <Card.Title className="truncate text-[15px] font-bold text-[#172033]">Tủ Boxora Nguyễn Huệ</Card.Title>
-          <Card.Description className="text-xs">Mã tủ: {lockerCode}</Card.Description>
+          <Card.Title className="truncate text-[15px] font-bold text-[#172033]">Tủ Boxora {lockerCode}</Card.Title>
+          <Card.Description className="text-xs">Điểm tủ từ mã QR đã quét</Card.Description>
         </div>
         <Chip className="shrink-0" color="success" size="sm" variant="soft">
-          <span aria-hidden="true" className="size-1.5 rounded-full bg-current" /> Online
+          <Check className="size-3" /> Đã xác nhận
         </Chip>
       </Card.Header>
       <Card.Content className="px-4 pb-1 pt-0">
         <div className="flex items-center gap-3 border-t border-[#eee7e1] py-3 text-[12px] font-medium text-[#303747]">
-          <MapPin className="size-5 shrink-0 text-[#f55a12]" />
-          <span>12 Nguyễn Huệ, Phường Bến Nghé, Quận 1, TP.HCM</span>
-        </div>
-        <div className="flex items-center gap-3 border-t border-[#eee7e1] py-3 text-[12px] font-medium text-[#303747]">
           <Clock className="size-5 shrink-0 text-[#f55a12]" />
-          <span>24/7</span>
+          <span>Kiểm tra đúng mã tủ trước khi tiếp tục</span>
         </div>
       </Card.Content>
     </Card>
@@ -369,15 +362,15 @@ function RecipientCard({ phone }: { phone: string }) {
   return (
     <Card className="rounded-[1.6rem] border border-[#f4dfd0] bg-white shadow-[0_14px_38px_rgba(101,45,12,.09)]">
       <Card.Content className="flex-row items-center gap-4">
-        <Avatar className="size-14" size="lg" color="accent" variant="soft">
-          <Avatar.Fallback className="bg-[#fff0e5] font-bold text-[#f55a12]">NH</Avatar.Fallback>
-        </Avatar>
+        <span className="flex size-14 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e5] text-[#f55a12]">
+          <Handset className="size-6" />
+        </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-base font-bold text-[#172033]">Nguyễn Thị Hằng</p>
+          <p className="text-xs font-medium text-muted">Số điện thoại người nhận</p>
           <p className="text-sm text-muted">{formatPhone(phone)}</p>
         </div>
         <Chip color="success" size="sm" variant="soft">
-          <Check className="size-3" /> Đã tìm thấy
+          <Check className="size-3" /> Đã nhập
         </Chip>
       </Card.Content>
     </Card>
@@ -475,7 +468,7 @@ export function DeliveryFlow() {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [lockerCode, setLockerCode] = useState("LK-01");
   const [phone, setPhone] = useState("");
-  const [found, setFound] = useState(false);
+  const [phoneConfirmed, setPhoneConfirmed] = useState(false);
   const [phoneError, setPhoneError] = useState("");
   const [apiError, setApiError] = useState("");
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
@@ -484,16 +477,17 @@ export function DeliveryFlow() {
   const [approvalDeadline, setApprovalDeadline] = useState<number | null>(null);
   const [approvalSeconds, setApprovalSeconds] = useState(APPROVAL_DURATION_SECONDS);
   const [isStartingDelivery, setIsStartingDelivery] = useState(false);
-  const [isSearchingRecipient, setIsSearchingRecipient] = useState(false);
   const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [otp, setOtp] = useState("");
   const [otpError, setOtpError] = useState("");
+  const [isVerifyingPickup, setIsVerifyingPickup] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [doorSeconds, setDoorSeconds] = useState(298);
   const [checkingDoor, setCheckingDoor] = useState(false);
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
+  const [pickupCompartmentCode, setPickupCompartmentCode] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -501,7 +495,7 @@ export function DeliveryFlow() {
     const preview = searchParams.get("preview") as Screen | null;
     const previewPhone = searchParams.get("phone");
     const scannedLockerCode = searchParams.get("locker")?.trim();
-    const available: Screen[] = ["welcome", "home", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "recipient", "parcel", "confirm", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout"];
+    const available: Screen[] = ["welcome", "home", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "receive-success", "recipient", "parcel", "confirm", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout"];
     const timer = window.setTimeout(() => {
       if (scannedLockerCode) setLockerCode(scannedLockerCode);
       if (previewPhone) setPhone(formatPhone(previewPhone));
@@ -611,10 +605,52 @@ export function DeliveryFlow() {
     return () => URL.revokeObjectURL(imageUrl);
   }, [imageUrl]);
 
+  useEffect(() => {
+    if (screen !== "receive-opened" || !pickupSession) return;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      if (cancelled || document.visibilityState !== "visible" || !navigator.onLine) return;
+      try {
+        await getReturnPickup(pickupSession);
+        if (!cancelled) timer = window.setTimeout(poll, 2000);
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof DeliveryApiError && error.status === 409) {
+          setApiError("");
+          setPickupCompartmentCode(pickupSession.compartmentCode);
+          setPickupSession(null);
+          setScreen("receive-success");
+          return;
+        }
+        setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái cửa tủ.");
+        timer = window.setTimeout(poll, 3000);
+      }
+    };
+
+    const resumePolling = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (timer) window.clearTimeout(timer);
+      timer = undefined;
+      void poll();
+    };
+
+    void poll();
+    document.addEventListener("visibilitychange", resumePolling);
+    window.addEventListener("online", resumePolling);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", resumePolling);
+      window.removeEventListener("online", resumePolling);
+    };
+  }, [pickupSession, screen]);
+
   const reset = () => {
     setScreen("welcome");
     setPhone("");
-    setFound(false);
+    setPhoneConfirmed(false);
     setPhoneError("");
     setApiError("");
     setDeliverySession(null);
@@ -623,31 +659,41 @@ export function DeliveryFlow() {
     setApprovalDeadline(null);
     setApprovalSeconds(APPROVAL_DURATION_SECONDS);
     setIsStartingDelivery(false);
-    setIsSearchingRecipient(false);
     setIsSendingRequest(false);
     setOtp("");
     setOtpError("");
+    setIsVerifyingPickup(false);
     setImageUrl(null);
     setImageFile(null);
     setDoorSeconds(298);
     setCheckingDoor(false);
     setOpeningDoor(false);
     setPickupSession(null);
+    setPickupCompartmentCode("");
   };
 
   const verifyPickupCode = async () => {
     setOtpError("");
+    if (!/^\d{6}$/.test(otp)) {
+      setOtpError("Mã lấy hàng phải gồm đúng 6 chữ số.");
+      return;
+    }
+    setIsVerifyingPickup(true);
     try {
       const session = await validateReturnPickup(lockerCode, otp);
       setPickupSession(session);
+      setPickupCompartmentCode(session.compartmentCode);
       setScreen("receive-details");
     } catch (error) {
       setOtpError(error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
+    } finally {
+      setIsVerifyingPickup(false);
     }
   };
 
   const openPickupCompartment = async () => {
     if (!pickupSession) return;
+    setApiError("");
     setOpeningDoor(true);
     try {
       setPickupSession(await openReturnPickup(pickupSession));
@@ -658,26 +704,17 @@ export function DeliveryFlow() {
     } finally { setOpeningDoor(false); }
   };
 
-  const completePickup = () => {
-    if (!pickupSession) return;
-    reset();
-  };
-
-  const searchRecipient = () => {
+  const confirmRecipientPhone = () => {
     const normalized = phoneDigits(phone);
     if (!/^0\d{9}$/.test(normalized)) {
       setPhoneError("Nhập số điện thoại Việt Nam gồm 10 chữ số.");
-      setFound(false);
+      setPhoneConfirmed(false);
       return;
     }
 
     setPhone(formatPhone(normalized));
     setPhoneError("");
-    setIsSearchingRecipient(true);
-    window.setTimeout(() => {
-      setFound(true);
-      setIsSearchingRecipient(false);
-    }, 800);
+    setPhoneConfirmed(true);
   };
 
   const choosePhoto = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -768,7 +805,7 @@ export function DeliveryFlow() {
       "receive-otp": "welcome",
       "receive-details": "receive-otp",
       "receive-open-failed": "receive-details",
-      "receive-opened": "receive-details",
+      "receive-success": "welcome",
       recipient: "home",
       "not-found": "recipient",
       parcel: "recipient",
@@ -841,12 +878,13 @@ export function DeliveryFlow() {
                 <InputOTP
                   aria-describedby={otpError ? "otp-error" : undefined}
                   className="w-full"
-                  inputMode="text"
+                  inputMode="numeric"
+                  isDisabled={isVerifyingPickup}
                   isInvalid={Boolean(otpError)}
                   maxLength={6}
                   name="pickup-code"
                   pasteTransformer={normalizePickupCode}
-                  pattern={REGEXP_ONLY_DIGITS_AND_CHARS}
+                  pattern={REGEXP_ONLY_DIGITS}
                   value={otp}
                   onChange={(value) => { setOtp(normalizePickupCode(value)); setOtpError(""); }}
                 >
@@ -879,13 +917,14 @@ export function DeliveryFlow() {
               <Button
                 fullWidth
                 isDisabled={otp.length !== 6}
+                isPending={isVerifyingPickup}
                 className="h-16 justify-between rounded-[1.4rem] bg-[#ff5b16] px-6 text-lg font-bold text-white shadow-[0_16px_34px_rgba(255,91,22,.25)]"
                 size="lg"
                 type="submit"
               >
-                <span className="size-5" />
-                Tiếp tục
-                <ArrowChevronRight className="size-6" />
+                {isVerifyingPickup ? <Spinner color="current" size="sm" /> : <span className="size-5" />}
+                {isVerifyingPickup ? "Đang xác thực..." : "Tiếp tục"}
+                <ArrowChevronRight className={`size-6 ${isVerifyingPickup ? "invisible" : ""}`} />
               </Button>
             </Form>
           </div>
@@ -906,7 +945,11 @@ export function DeliveryFlow() {
 
             <Card className="relative mt-6 min-h-[22rem] overflow-hidden rounded-[1.7rem] border border-[#f2e8e1] bg-white p-0 shadow-[0_18px_48px_rgba(92,40,11,.12)]">
               <div aria-hidden="true" className="absolute inset-y-0 right-0 w-[58%] [mask-image:linear-gradient(to_right,transparent_0%,black_45%)]">
-                {pickupSession ? <img alt="Ảnh kiện hàng cư dân gửi" className="size-full object-cover object-center" src={pickupSession.imageUrl} /> : null}
+                {pickupSession ? (
+                  // The backend may return images from different configured storage hosts.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img alt="Ảnh kiện hàng cư dân gửi" className="size-full object-cover object-center" src={pickupSession.imageUrl} />
+                ) : null}
                 <div className="absolute inset-0 bg-linear-to-b from-white/45 via-transparent to-white/20" />
                 <Chip className="absolute right-5 top-[47%] border border-white/60 bg-[#ff6a1a] font-bold text-white shadow-lg" size="sm">
                   {pickupSession?.compartmentCode}
@@ -932,13 +975,12 @@ export function DeliveryFlow() {
                 <div className="mt-5 h-px bg-[#eee7e1]" />
 
                 <div className="mt-5 flex items-center gap-4">
-                  <Avatar className="size-16" color="accent" size="lg" variant="soft">
-                    <Avatar.Fallback className="bg-[#fff0e5] text-lg font-bold text-[#ff5b16]">NH</Avatar.Fallback>
-                  </Avatar>
+                  <span className="flex size-14 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e5] text-[#ff5b16]">
+                    <Box className="size-6" />
+                  </span>
                   <div className="min-w-0">
-                    <p className="text-sm text-[#697386]">Kiện hàng gửi qua tủ</p>
-                    <p className="truncate text-lg font-bold text-[#171717]">Ảnh đã được cư dân xác nhận</p>
-                    <p className="text-base text-[#697386]">Chỉ mở đúng ngăn được hệ thống chỉ định</p>
+                    <p className="text-sm text-[#697386]">Kiện hàng trả đã được xác nhận</p>
+                    <p className="text-base font-bold text-[#171717]">Chỉ mở ngăn {pickupSession?.compartmentCode}</p>
                   </div>
                 </div>
               </Card.Content>
@@ -974,7 +1016,11 @@ export function DeliveryFlow() {
             <Card className="mt-6 overflow-hidden rounded-[1.7rem] border border-[#f2e8e1] bg-white p-0 shadow-[0_18px_48px_rgba(92,40,11,.12)]">
               <Card.Content className="p-0">
                 <div className="relative aspect-[16/9] overflow-hidden bg-[#fff7ef]">
-                  {pickupSession ? <img alt="Ảnh kiện hàng cần lấy" className="size-full object-cover object-center" src={pickupSession.imageUrl} /> : null}
+                  {pickupSession ? (
+                    // The backend may return images from different configured storage hosts.
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img alt="Ảnh kiện hàng cần lấy" className="size-full object-cover object-center" src={pickupSession.imageUrl} />
+                  ) : null}
                   <div className="absolute inset-0 bg-linear-to-t from-[#3b1b08]/30 via-transparent to-white/10" />
                   <Chip className="absolute right-4 top-4 border border-white/60 bg-[#ff6a1a] font-bold text-white shadow-lg" size="sm">
                     {pickupSession?.compartmentCode} · Đang mở
@@ -1002,18 +1048,33 @@ export function DeliveryFlow() {
               </Card.Content>
             </Card>
 
-            <div className="mt-auto pt-6">
-              <Button
-                fullWidth
-                className="h-16 rounded-[1.4rem] bg-[#ff5b16] text-lg font-bold text-white shadow-[0_16px_34px_rgba(255,91,22,.25)]"
-                size="lg"
-                isPending={openingDoor}
-                onPress={completePickup}
-              >
-                 <Check className="size-6" /> Tôi đã lấy hàng và đóng cửa
-              </Button>
+            {apiError ? <div className="mt-4"><ApiErrorCard message={apiError} /></div> : null}
+            <div className="mt-auto flex items-center justify-center gap-3 pt-6 text-sm font-semibold text-[#697386]" aria-live="polite">
+              <Spinner size="sm" /> Đang chờ tủ xác nhận cửa đã đóng
             </div>
           </div>
+        );
+
+      case "receive-success":
+        return (
+          <StatusScreen
+            tone="success"
+            icon={<CircleCheckFill className="size-12" />}
+            title="Lấy hàng thành công"
+            description={`Tủ đã xác nhận cửa ngăn ${pickupCompartmentCode} đóng và phiên lấy hàng đã hoàn tất.`}
+          >
+            <Card variant="secondary">
+              <Card.Content className="space-y-3 text-sm">
+                {[['Locker', lockerCode], ['Ngăn', pickupCompartmentCode], ['Trạng thái', 'Đã lấy hàng']].map(([label, value]) => (
+                  <div className="flex justify-between gap-4 border-b border-border pb-3 last:border-0 last:pb-0" key={label}>
+                    <span className="text-muted">{label}</span>
+                    <span className="text-right font-semibold">{value}</span>
+                  </div>
+                ))}
+              </Card.Content>
+            </Card>
+            <Button fullWidth size="lg" onPress={reset}>Hoàn tất</Button>
+          </StatusScreen>
         );
 
       case "receive-open-failed":
@@ -1080,15 +1141,15 @@ export function DeliveryFlow() {
 
             <div className="mt-4 text-center">
               <h1 className="text-[1.8rem] font-bold tracking-[-0.05em] text-[#172033]">
-                {found ? "Đã tìm thấy người nhận" : "Nhập người nhận"}
+                {phoneConfirmed ? "Kiểm tra số điện thoại" : "Nhập người nhận"}
               </h1>
               <p className="mt-1 text-sm text-muted">
-                {found ? "Kiểm tra đúng thông tin trước khi tiếp tục." : "Nhập số điện thoại người nhận để tiếp tục."}
+                {phoneConfirmed ? "Backend sẽ xác thực người nhận khi bạn gửi yêu cầu." : "Nhập số điện thoại người nhận để tiếp tục."}
               </p>
             </div>
 
-            {!found ? (
-              <Form className="mt-5 flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); searchRecipient(); }}>
+            {!phoneConfirmed ? (
+              <Form className="mt-5 flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); confirmRecipientPhone(); }}>
                 <Card className="rounded-[1.6rem] border border-[#f4ebe5] bg-white shadow-[0_14px_38px_rgba(101,45,12,.07)]">
                   <Card.Content>
                     <TextField
@@ -1123,21 +1184,13 @@ export function DeliveryFlow() {
                 <Button
                   fullWidth
                   isDisabled={phoneDigits(phone).length !== 10 || Boolean(phoneError)}
-                  isPending={isSearchingRecipient}
                   className="h-14 justify-between rounded-2xl bg-[#ff5b16] px-5 text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
                   size="lg"
                   type="submit"
                 >
-                  {({ isPending }) => (
-                    <>
-                      <span className="size-5" />
-                      <span className="flex items-center gap-2">
-                        {isPending ? <Spinner color="current" size="sm" /> : null}
-                        {isPending ? "Đang tìm người nhận..." : "Tiếp tục"}
-                      </span>
-                      <ArrowChevronRight className={`size-5 ${isPending ? "invisible" : ""}`} />
-                    </>
-                  )}
+                  <span className="size-5" />
+                  Xác nhận số điện thoại
+                  <ArrowChevronRight className="size-5" />
                 </Button>
               </Form>
             ) : (
@@ -1153,7 +1206,7 @@ export function DeliveryFlow() {
                   Tiếp tục chụp kiện hàng
                   <ArrowChevronRight className="size-5" />
                 </Button>
-                <Button fullWidth size="sm" variant="ghost" onPress={() => setFound(false)}>
+                <Button fullWidth size="sm" variant="ghost" onPress={() => setPhoneConfirmed(false)}>
                   <span className="font-semibold text-[#f55a12]">Nhập số điện thoại khác</span>
                 </Button>
               </div>
@@ -1213,49 +1266,49 @@ export function DeliveryFlow() {
       case "confirm":
         return (
           <div className="flex flex-1 flex-col">
-            <div className="mx-auto w-48 overflow-hidden rounded-[1.5rem] bg-[#fff2e8] shadow-[0_16px_38px_rgba(92,40,11,.16)] ring-1 ring-[#f4dfd0]">
-              <div className="relative aspect-square">
-                {imageUrl?.startsWith("blob:") ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img alt="Kiện hàng cần xác nhận" className="h-full w-full object-cover" src={imageUrl} />
-                ) : (
-                  <Image
-                    alt="Kiện hàng cần xác nhận"
-                    className="object-cover"
-                    fill
-                    sizes="192px"
-                    src={imageUrl ?? "/illustrations/parcel-photo-guide.png"}
-                  />
-                )}
-              </div>
+            <div className="mb-5">
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#f55a12]">Bước cuối</p>
+              <h1 className="mt-1 text-[1.9rem] font-extrabold tracking-[-0.05em] text-[#172033]">Kiểm tra kiện hàng</h1>
+              <p className="mt-1 text-sm leading-6 text-muted">Đối chiếu ảnh, số điện thoại và mã tủ trước khi gửi cho cư dân.</p>
             </div>
 
-            <div className="mb-5 mt-5 text-center">
-              <h1 className="text-[1.75rem] font-bold tracking-[-0.045em] text-[#172033]">Xác nhận thông tin</h1>
-              <p className="mt-1 text-sm text-muted">Kiểm tra lại trước khi gửi yêu cầu.</p>
-            </div>
-
-            <Card className="gap-0 rounded-[1.6rem] border border-[#f2e7df] bg-white p-0 shadow-[0_14px_38px_rgba(91,40,10,.08)]">
-              <Card.Content className="px-4 py-1">
-                <div className="flex items-center gap-3 py-3.5">
-                  <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
-                    <Person className="size-5" />
-                  </span>
+            <Card className="gap-0 overflow-hidden rounded-[1.7rem] border border-[#f2e7df] bg-white p-0 shadow-[0_18px_46px_rgba(91,40,10,.1)]">
+              <Card.Content className="p-0">
+                <div className="flex items-center gap-4 bg-[#fff7f1] p-4">
+                  <div className="relative size-24 shrink-0 overflow-hidden rounded-2xl bg-[#fff2e8] ring-1 ring-[#f4dfd0]">
+                    {imageUrl?.startsWith("blob:") ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img alt="Kiện hàng cần xác nhận" className="size-full object-cover" src={imageUrl} />
+                    ) : (
+                      <Image alt="Kiện hàng cần xác nhận" className="object-cover" fill sizes="96px" src={imageUrl ?? "/illustrations/parcel-photo-guide.png"} />
+                    )}
+                  </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs text-muted">Người nhận</p>
-                    <p className="truncate font-bold text-[#172033]">Nguyễn Thị Hằng</p>
-                    <p className="text-sm text-muted">{formatPhone(phone)}</p>
+                    <Chip color="success" size="sm" variant="soft"><Check className="size-3" /> Ảnh đã sẵn sàng</Chip>
+                    <p className="mt-2 text-sm font-bold text-[#172033]">Ảnh kiện hàng sẽ được gửi kèm yêu cầu</p>
+                    <Button className="mt-1 h-8 px-0 text-[#f55a12]" size="sm" variant="ghost" onPress={() => setScreen("parcel")}>Chụp lại ảnh</Button>
                   </div>
                 </div>
-                <div className="h-px bg-[#eee7e1]" />
-                <div className="flex items-center gap-3 py-3.5">
-                  <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
-                    <MapPin className="size-5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs text-muted">Điểm gửi</p>
-                    <p className="font-bold text-[#172033]">Locker {lockerCode}</p>
-                    <p className="truncate text-sm text-muted">12 Nguyễn Huệ, Quận 1</p>
+                <div className="px-4">
+                  <div className="flex items-center gap-3 py-4">
+                   <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
+                      <Handset className="size-5" />
+                   </span>
+                   <div className="min-w-0 flex-1">
+                      <p className="text-xs text-muted">Số điện thoại người nhận</p>
+                      <p className="font-bold text-[#172033]">{formatPhone(phone)}</p>
+                   </div>
+                    <Button className="h-9 px-3 text-[#f55a12]" size="sm" variant="ghost" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Sửa</Button>
+                 </div>
+                 <div className="h-px bg-[#eee7e1]" />
+                  <div className="flex items-center gap-3 py-4">
+                    <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
+                      <Box className="size-5" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-muted">Điểm gửi</p>
+                      <p className="font-bold text-[#172033]">Locker {lockerCode}</p>
+                    </div>
                   </div>
                 </div>
               </Card.Content>
@@ -1269,7 +1322,7 @@ export function DeliveryFlow() {
                 size="lg"
                 onPress={sendDeliveryRequest}
               >
-                {isSendingRequest ? <><Spinner color="current" size="sm" /> Đang gửi yêu cầu...</> : "Gửi yêu cầu"}
+                {isSendingRequest ? <><Spinner color="current" size="sm" /> Đang gửi yêu cầu...</> : "Gửi yêu cầu cho cư dân"}
               </Button>
             </div>
           </div>
@@ -1292,7 +1345,7 @@ export function DeliveryFlow() {
             <Card className="mt-5 rounded-[1.6rem] border border-[#f2e7df] bg-white p-0 shadow-[0_14px_38px_rgba(91,40,10,.09)]">
               <Card.Content className="p-3">
                 <Link
-                  aria-label={`Gọi cho Nguyễn Thị Hằng theo số ${formatPhone(phone)}`}
+                  aria-label={`Gọi người nhận theo số ${formatPhone(phone)}`}
                   className="group flex w-full items-center gap-3 no-underline"
                   href={`tel:${phoneDigits(phone)}`}
                 >
@@ -1300,8 +1353,7 @@ export function DeliveryFlow() {
                     <Handset className="size-6" />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block text-xs text-muted">Cư dân</span>
-                    <span className="block truncate text-sm font-bold text-[#172033]">Nguyễn Thị Hằng</span>
+                    <span className="block text-xs text-muted">Số điện thoại người nhận</span>
                     <span className="block text-sm font-semibold text-[#ff5b16]">{formatPhone(phone)}</span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-[#fff2e9] px-3 py-2 text-sm font-semibold text-[#f55a12] transition-colors group-hover:bg-[#ffe4d3]">
@@ -1432,7 +1484,7 @@ export function DeliveryFlow() {
       case "not-found":
         return (
           <StatusScreen tone="danger" icon={<Xmark className="size-11" />} title="Không tìm thấy người nhận trên hệ thống" description="Số điện thoại chưa thuộc Resident đã đăng ký. Kiểm tra lại trước khi tiếp tục.">
-            <Button fullWidth size="lg" onPress={() => { setFound(false); setScreen("recipient"); }}>Kiểm tra lại SĐT</Button>
+            <Button fullWidth size="lg" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Kiểm tra lại SĐT</Button>
           </StatusScreen>
         );
 
@@ -1452,14 +1504,14 @@ export function DeliveryFlow() {
 
       case "full":
         return (
-          <StatusScreen tone="warning" icon={<Box className="size-11" />} title="Locker đã hết ngăn trống" description="Hiện tại LK-01 không còn ngăn khả dụng. Vui lòng thử lại sau.">
+          <StatusScreen tone="warning" icon={<Box className="size-11" />} title="Locker đã hết ngăn trống" description={`Hiện tại ${lockerCode} không còn ngăn khả dụng. Vui lòng thử lại sau.`}>
             <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
           </StatusScreen>
         );
 
       case "door-timeout":
         return (
-          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Quá 5 phút cửa chưa đóng" description="Lượt gửi không hoàn tất và cảnh báo vận hành đã được tạo cho Locker LK-01.">
+          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Quá 5 phút cửa chưa đóng" description={`Lượt gửi không hoàn tất và cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}>
             <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
           </StatusScreen>
         );
@@ -1478,8 +1530,8 @@ export function DeliveryFlow() {
   return (
     <div className="min-h-dvh bg-surface-secondary sm:py-8">
       <div className="mx-auto flex min-h-dvh w-full max-w-lg flex-col bg-background sm:min-h-[calc(100dvh-4rem)] sm:overflow-hidden sm:rounded-3xl sm:border sm:border-border sm:shadow-sm">
-        <AppHeader isBackDisabled={openingDoor} lockerCode={lockerCode} goBack={goBack} />
-        <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : screen === "receive-details" || screen === "receive-open-failed" || screen === "receive-opened" ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
+        <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
+        <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : ["receive-details", "receive-open-failed", "receive-opened", "receive-success"].includes(screen) ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
           {content}
         </main>
       </div>
