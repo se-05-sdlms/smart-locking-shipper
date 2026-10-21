@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Chip,
+  Description,
   FieldError,
   Form,
   Input,
@@ -11,7 +12,10 @@ import {
   Label,
   Link,
   REGEXP_ONLY_DIGITS,
+  Radio,
+  RadioGroup,
   Spinner,
+  TextArea,
   TextField,
 } from "@heroui/react";
 import {
@@ -41,12 +45,13 @@ import {
   getReturnPickup,
   initiateDelivery,
   openReturnPickup,
+  reportGuestIncident,
   reserveCompartment,
   submitDelivery,
   uploadParcelFile,
   validateReturnPickup,
 } from "./delivery-api";
-import type { DeliverySession, ReturnPickupSession } from "./delivery-api";
+import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
 
 type Screen =
   | "welcome"
@@ -70,7 +75,19 @@ type Screen =
   | "full"
   | "door-timeout"
   | "invalid-locker"
-  | "locker-unavailable";
+  | "locker-unavailable"
+  | "incident"
+  | "incident-success";
+
+const INCIDENT_TYPES: { value: GuestIncidentType; label: string; hint: string }[] = [
+  { value: "Compartment", label: "Không mở được ngăn / kẹt cửa", hint: "Ngăn không mở, cửa kẹt hoặc không đóng được" },
+  { value: "Locker", label: "Tủ hỏng hoặc không phản hồi", hint: "Màn hình, nguồn hoặc kết nối của tủ gặp sự cố" },
+  { value: "Parcel", label: "Sai thông tin kiện hàng", hint: "Sai người nhận, sai ngăn hoặc kiện hàng có vấn đề" },
+  { value: "Return", label: "Sự cố khi lấy hàng trả", hint: "Mã lấy hàng hoặc ngăn hàng trả không đúng" },
+  { value: "Other", label: "Vấn đề khác", hint: "Sự cố không thuộc các nhóm trên" },
+];
+const INCIDENT_DESCRIPTION_MIN = 10;
+const INCIDENT_DESCRIPTION_MAX = 4000;
 
 const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
 // Preview links (?preview=<screen>) are a design aid only and must never be reachable in production.
@@ -331,9 +348,11 @@ function SendCarousel() {
 function WelcomeScreen({
   onSend,
   onReceive,
+  onReport,
 }: {
   onSend: () => void;
   onReceive: () => void;
+  onReport: () => void;
 }) {
   return (
     <main className="welcome-screen relative isolate flex min-h-dvh flex-col overflow-hidden bg-[#fff4ea] text-[#172033]">
@@ -387,6 +406,16 @@ function WelcomeScreen({
             <span className="text-[1.65rem] font-bold tracking-[-0.035em]">Lấy hàng</span>
           </span>
           <ArrowChevronRight className="size-7 transition-transform group-hover:translate-x-1" />
+        </Button>
+
+        <Button
+          fullWidth
+          className="h-11 text-sm font-semibold text-white drop-shadow-[0_1px_6px_rgba(0,0,0,.45)]"
+          size="sm"
+          variant="ghost"
+          onPress={onReport}
+        >
+          <TriangleExclamation className="size-4" /> Báo sự cố tại tủ
         </Button>
       </div>
     </main>
@@ -570,6 +599,12 @@ export function DeliveryFlow() {
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
   const [pickupCompartmentCode, setPickupCompartmentCode] = useState("");
+  const [incidentOrigin, setIncidentOrigin] = useState<Screen>("welcome");
+  const [incidentType, setIncidentType] = useState<GuestIncidentType | "">("");
+  const [incidentDescription, setIncidentDescription] = useState("");
+  const [incidentError, setIncidentError] = useState("");
+  const [isSubmittingIncident, setIsSubmittingIncident] = useState(false);
+  const [incidentReference, setIncidentReference] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -780,6 +815,55 @@ export function DeliveryFlow() {
     setOpeningDoor(false);
     setPickupSession(null);
     setPickupCompartmentCode("");
+    setIncidentType("");
+    setIncidentDescription("");
+    setIncidentError("");
+    setIncidentReference("");
+  };
+
+  const openIncidentReport = () => {
+    setIncidentOrigin(screen);
+    setIncidentType(screen.startsWith("receive-") ? "Return" : "");
+    setIncidentDescription("");
+    setIncidentError("");
+    setScreen("incident");
+  };
+
+  const submitIncident = async () => {
+    const description = incidentDescription.trim();
+    const type = INCIDENT_TYPES.find((item) => item.value === incidentType);
+    if (!type) {
+      setIncidentError("Chọn loại sự cố trước khi gửi.");
+      return;
+    }
+    if (description.length < INCIDENT_DESCRIPTION_MIN) {
+      setIncidentError(`Mô tả cần ít nhất ${INCIDENT_DESCRIPTION_MIN} ký tự để bộ phận vận hành xử lý.`);
+      return;
+    }
+
+    setIncidentError("");
+    setIsSubmittingIncident(true);
+    try {
+      // Link the report to the guest flow in progress so operators see the related request.
+      const incident = await reportGuestIncident({
+        lockerCode,
+        type: type.value,
+        title: `Shipper báo sự cố: ${type.label}`,
+        description,
+        deliveryRequestId: pickupSession ? undefined : deliverySession?.id,
+        returnRequestId: pickupSession?.returnRequestId,
+      });
+      setIncidentReference(incident.referenceCode);
+      setScreen("incident-success");
+    } catch (error) {
+      if (error instanceof DeliveryApiError && error.code === "locker/not_found") {
+        setScreen("invalid-locker");
+        return;
+      }
+      setIncidentError(error instanceof Error ? error.message : "Không thể gửi báo cáo sự cố. Vui lòng thử lại.");
+    } finally {
+      setIsSubmittingIncident(false);
+    }
   };
 
   const verifyPickupCode = async () => {
@@ -940,9 +1024,17 @@ export function DeliveryFlow() {
       "door-timeout": "home",
       "locker-unavailable": "welcome",
       success: "home",
+      incident: incidentOrigin,
+      "incident-success": "welcome",
     };
     setScreen(previous[screen] ?? "home");
   };
+
+  const reportIncidentLink = (
+    <Button fullWidth className="h-11 text-sm font-semibold text-[#f55a12]" size="sm" variant="ghost" onPress={openIncidentReport}>
+      <TriangleExclamation className="size-4" /> Báo sự cố tại tủ
+    </Button>
+  );
 
   const content = (() => {
     switch (screen) {
@@ -979,6 +1071,7 @@ export function DeliveryFlow() {
               </Button>
               {apiError ? <div className="mt-3"><ApiErrorCard message={apiError} /></div> : null}
               <p className="mt-3 text-center text-xs text-muted">Không cần tài khoản · Muốn dùng tủ khác, hãy quét mã QR trên tủ đó</p>
+              <div className="mt-2">{reportIncidentLink}</div>
             </div>
           </div>
         );
@@ -1228,6 +1321,7 @@ export function DeliveryFlow() {
                 {openingDoor ? <><Spinner color="current" size="sm" /> Đang thử mở lại...</> : <><LockOpen className="size-6" /> Thử mở lại</>}
               </Button>
               <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={reset}>Về trang đầu</Button>
+              {reportIncidentLink}
             </div>
           </div>
         );
@@ -1561,6 +1655,7 @@ export function DeliveryFlow() {
                 {checkingDoor ? <><Spinner color="current" size="sm" /> Đang kiểm tra cửa...</> : "Tôi đã đóng cửa"}
               </Button>
               <p className="mt-3 text-center text-xs leading-5 text-muted">Nút này chỉ yêu cầu hệ thống kiểm tra lại; trạng thái cảm biến cửa mới là xác nhận cuối cùng.</p>
+              {reportIncidentLink}
             </div>
           </div>
         );
@@ -1631,7 +1726,7 @@ export function DeliveryFlow() {
             icon={<Box className="size-10" />}
             title="Locker đã hết ngăn trống"
             description={`Hiện tại ${lockerCode} không còn ngăn khả dụng. Vui lòng thử lại sau.`}
-            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+            actions={<><Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>{reportIncidentLink}</>}
           />
         );
 
@@ -1642,7 +1737,7 @@ export function DeliveryFlow() {
             icon={<TriangleExclamation className="size-10" />}
             title="Lượt gửi chưa hoàn tất"
             description={`Cửa ngăn chưa được đóng trong thời gian cho phép hoặc tủ gặp sự cố. Cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}
-            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+            actions={<><Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>{reportIncidentLink}</>}
           />
         );
 
@@ -1654,6 +1749,80 @@ export function DeliveryFlow() {
             title="Link tủ không hợp lệ"
             description="Không xác định được tủ từ đường dẫn này. Hãy quét lại mã QR dán trên tủ Boxora để bắt đầu."
             actions={<Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => window.location.reload()}>Tải lại trang</Button>}
+          />
+        );
+
+      case "incident":
+        return (
+          <Form className="flex flex-1 flex-col" onSubmit={(event) => { event.preventDefault(); void submitIncident(); }}>
+            <div className="mb-5">
+              <h1 className="text-[1.75rem] font-bold tracking-[-0.045em] text-[#172033]">Báo sự cố tại tủ</h1>
+              <p className="mt-1 text-sm leading-6 text-muted">Bộ phận vận hành của Locker {lockerCode} sẽ nhận và xử lý báo cáo này.</p>
+            </div>
+
+            <Card className={`gap-0 p-0 ${SURFACE_CARD_CLASS}`}>
+              <Card.Content className="p-4">
+                <RadioGroup
+                  aria-label="Loại sự cố"
+                  className="gap-2"
+                  value={incidentType}
+                  onChange={(value) => { setIncidentType(value as GuestIncidentType); setIncidentError(""); }}
+                >
+                  <Label className="mb-1 font-semibold text-[#303747]">Loại sự cố</Label>
+                  {INCIDENT_TYPES.map((item) => (
+                    <Radio
+                      className="w-full rounded-2xl border border-[#f1e6de] px-3 py-3 has-[[data-selected=true]]:border-[#ff5b16] has-[[data-selected=true]]:bg-[#fff5ed]"
+                      key={item.value}
+                      value={item.value}
+                    >
+                      <Radio.Content>
+                        <Radio.Control>
+                          <Radio.Indicator />
+                        </Radio.Control>
+                        <Label className="font-semibold text-[#172033]">{item.label}</Label>
+                      </Radio.Content>
+                      <Description className="text-xs">{item.hint}</Description>
+                    </Radio>
+                  ))}
+                </RadioGroup>
+              </Card.Content>
+            </Card>
+
+            <Card className={`mt-4 gap-0 p-0 ${SURFACE_CARD_CLASS}`}>
+              <Card.Content className="p-4">
+                <TextField
+                  className="w-full"
+                  isInvalid={Boolean(incidentError) && incidentDescription.trim().length < INCIDENT_DESCRIPTION_MIN}
+                  value={incidentDescription}
+                  onChange={(value) => { setIncidentDescription(value.slice(0, INCIDENT_DESCRIPTION_MAX)); setIncidentError(""); }}
+                >
+                  <Label className="font-semibold text-[#303747]">Mô tả sự cố</Label>
+                  <TextArea className="mt-2 min-h-28 rounded-xl" placeholder="Ví dụ: Ngăn A03 không mở sau khi bấm mở, cửa vẫn khóa." rows={4} />
+                  <Description className="mt-1 text-xs">{incidentDescription.trim().length}/{INCIDENT_DESCRIPTION_MAX} ký tự</Description>
+                </TextField>
+              </Card.Content>
+            </Card>
+
+            {incidentError ? <div className="pt-4"><ApiErrorCard message={incidentError} /></div> : null}
+
+            <div className="mt-auto space-y-3 pt-6">
+              <Button fullWidth className={PRIMARY_BUTTON_CLASS} isPending={isSubmittingIncident} size="lg" type="submit">
+                {isSubmittingIncident ? <><Spinner color="current" size="sm" /> Đang gửi báo cáo...</> : "Gửi báo cáo sự cố"}
+              </Button>
+              <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => setScreen(incidentOrigin)}>Quay lại</Button>
+            </div>
+          </Form>
+        );
+
+      case "incident-success":
+        return (
+          <StatusScreen
+            tone="success"
+            icon={<CircleCheckFill className="size-11" />}
+            title="Đã gửi báo cáo sự cố"
+            description="Bộ phận vận hành đã nhận báo cáo. Dùng mã tham chiếu dưới đây khi cần liên hệ theo dõi."
+            details={<InfoRows rows={[["Mã tham chiếu", incidentReference], ["Locker", lockerCode]]} />}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
           />
         );
 
@@ -1674,6 +1843,7 @@ export function DeliveryFlow() {
     return (
       <WelcomeScreen
         onReceive={() => setScreen("receive-otp")}
+        onReport={openIncidentReport}
         onSend={() => setScreen("home")}
       />
     );
