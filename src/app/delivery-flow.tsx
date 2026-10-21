@@ -77,6 +77,7 @@ const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
 const PREVIEW_ENABLED = process.env.NODE_ENV !== "production";
 const PREVIEW_APPROVAL_SECONDS = 10 * 60;
 const PREVIEW_DOOR_SECONDS = 5 * 60;
+const PREVIEW_COMPARTMENT_CODE = "A03";
 
 const formatTime = (seconds: number) =>
   `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -86,20 +87,42 @@ const secondsUntil = (deadline: number) => Math.max(0, Math.ceil((deadline - Dat
 const normalizePickupCode = (value: string) =>
   value.replace(/\D/g, "").slice(0, 6);
 
-function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; totalSeconds: number | null }) {
+// Shared Boxora styles so every screen in the flow uses the same buttons and surfaces.
+const PRIMARY_BUTTON_CLASS =
+  "h-14 rounded-2xl bg-[#ff5b16] text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]";
+const SECONDARY_BUTTON_CLASS =
+  "h-12 rounded-2xl border border-[#f1ded1] bg-white text-base font-semibold text-[#172033]";
+const SURFACE_CARD_CLASS =
+  "rounded-[1.7rem] border border-[#f2e7df] bg-white shadow-[0_18px_46px_rgba(91,40,10,.1)]";
+
+function CountdownRing({
+  seconds,
+  totalSeconds,
+  label,
+  pendingLabel,
+  ariaLabel,
+  size = "lg",
+}: {
+  seconds: number | null;
+  totalSeconds: number | null;
+  label: string;
+  pendingLabel: string;
+  ariaLabel: (time: string) => string;
+  size?: "lg" | "md";
+}) {
   const radius = 112;
   const circumference = 2 * Math.PI * radius;
   const progress = seconds === null || !totalSeconds ? 1 : Math.max(0, Math.min(1, seconds / totalSeconds));
 
   return (
     <div
-      aria-label={seconds === null ? "Đang đồng bộ thời hạn phê duyệt" : `Còn ${formatTime(seconds)} để cư dân phê duyệt`}
-      className="relative mx-auto aspect-square w-full max-w-[17rem]"
+      aria-label={seconds === null ? pendingLabel : ariaLabel(formatTime(seconds))}
+      className={`relative mx-auto aspect-square w-full ${size === "lg" ? "max-w-[17rem]" : "max-w-[13.5rem]"}`}
       role="timer"
     >
       <svg aria-hidden="true" className="absolute inset-0 size-full -rotate-90 drop-shadow-[0_14px_28px_rgba(255,91,22,.12)]" viewBox="0 0 260 260">
         <defs>
-          <linearGradient id="approval-ring" x1="0" x2="1" y1="0" y2="1">
+          <linearGradient id="countdown-ring" x1="0" x2="1" y1="0" y2="1">
             <stop offset="0%" stopColor="#ff9b55" />
             <stop offset="100%" stopColor="#ff5b16" />
           </linearGradient>
@@ -110,7 +133,7 @@ function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; 
           cy="130"
           fill="none"
           r={radius}
-          stroke="url(#approval-ring)"
+          stroke="url(#countdown-ring)"
           strokeDasharray={circumference}
           strokeDashoffset={circumference * (1 - progress)}
           strokeLinecap="round"
@@ -119,19 +142,29 @@ function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; 
         />
       </svg>
       <div className="absolute inset-[2.25rem] flex flex-col items-center justify-center rounded-full bg-[radial-gradient(circle_at_50%_30%,#fff_0%,#fff9f5_58%,#fff1e9_100%)] text-center shadow-[inset_0_0_0_1px_rgba(255,120,42,.08)]">
-        <Clock className="mb-2 size-8 text-[#ff5b16]" />
+        <Clock className={`mb-2 text-[#ff5b16] ${size === "lg" ? "size-8" : "size-6"}`} />
         {seconds === null ? (
-          <Spinner className="my-2" color="current" size="lg" />
+          <Spinner className="my-2 text-[#ff5b16]" color="current" size="lg" />
         ) : (
-          <span className="font-mono text-[2.7rem] leading-none font-bold tracking-[-0.06em] text-[#172033] tabular-nums">
+          <span className={`font-mono leading-none font-bold tracking-[-0.06em] text-[#172033] tabular-nums ${size === "lg" ? "text-[2.7rem]" : "text-[2.2rem]"}`}>
             {formatTime(seconds)}
           </span>
         )}
-        <span className="mt-2 text-xs font-medium text-muted">
-          {seconds === null ? "Đang đồng bộ thời hạn..." : "Đang chờ cư dân phê duyệt"}
-        </span>
+        <span className="mt-2 px-2 text-xs font-medium text-muted">{seconds === null ? pendingLabel : label}</span>
       </div>
     </div>
+  );
+}
+
+function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; totalSeconds: number | null }) {
+  return (
+    <CountdownRing
+      ariaLabel={(time) => `Còn ${time} để cư dân phê duyệt`}
+      label="Đang chờ cư dân phê duyệt"
+      pendingLabel="Đang đồng bộ thời hạn..."
+      seconds={seconds}
+      totalSeconds={totalSeconds}
+    />
   );
 }
 
@@ -197,18 +230,6 @@ function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisab
         </div>
       </div>
     </header>
-  );
-}
-
-function PageIntro({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
-  return (
-    <div className="mb-6">
-      <div className="mb-3 flex size-11 items-center justify-center rounded-xl bg-accent-soft text-accent-soft-foreground">
-        {icon}
-      </div>
-      <h1 className="text-2xl font-semibold tracking-tight text-pretty">{title}</h1>
-      <p className="mt-2 text-sm leading-6 text-muted text-pretty">{description}</p>
-    </div>
   );
 }
 
@@ -452,29 +473,72 @@ function StatusScreen({
   icon,
   title,
   description,
-  children,
+  details,
+  actions,
 }: {
-  tone: "danger" | "warning" | "success";
+  tone: "danger" | "warning" | "success" | "brand";
   icon: ReactNode;
   title: string;
   description: string;
-  children: ReactNode;
+  details?: ReactNode;
+  actions: ReactNode;
 }) {
   const toneClass = {
-    danger: "bg-danger-soft text-danger-soft-foreground",
-    warning: "bg-warning-soft text-warning-soft-foreground",
-    success: "bg-success-soft text-success-soft-foreground",
+    danger: "bg-[#fff0ec] text-[#e5484d] ring-[#ffd9d2]",
+    warning: "bg-[#fff4e5] text-[#e07b00] ring-[#ffe2bf]",
+    success: "bg-[#eaf9ef] text-[#20a555] ring-[#c9efd6]",
+    brand: "bg-[#fff0e5] text-[#ff5b16] ring-[#ffd7bf]",
   }[tone];
 
   return (
-    <div className="flex flex-1 flex-col justify-center py-6 text-center">
-      <div className={`mx-auto mb-5 flex size-20 items-center justify-center rounded-full ${toneClass}`}>
-        {icon}
+    <div className="flex flex-1 flex-col">
+      <div className="pt-4 text-center">
+        <span className={`mx-auto flex size-20 items-center justify-center rounded-[1.6rem] shadow-[0_14px_32px_rgba(91,40,10,.08)] ring-1 ${toneClass}`}>
+          {icon}
+        </span>
+        <h1 className="mt-5 text-[1.9rem] font-extrabold leading-tight tracking-[-0.05em] text-balance text-[#172033]">{title}</h1>
+        <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-pretty text-muted">{description}</p>
       </div>
-      <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-      <p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-muted">{description}</p>
-      <div className="mt-7 space-y-3 text-left">{children}</div>
+      {details ? <div className="mt-7 space-y-3">{details}</div> : null}
+      <div className="mt-auto space-y-3 pt-7">{actions}</div>
     </div>
+  );
+}
+
+function InfoRows({ title, subtitle, rows }: { title?: string; subtitle?: string; rows: [string, string][] }) {
+  return (
+    <Card className={`gap-0 p-0 ${SURFACE_CARD_CLASS}`}>
+      {title ? (
+        <Card.Header className="flex-row items-center gap-3 border-b border-[#eee7e1] px-5 py-4">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#fff0e5] text-[#ff5b16]">
+            <Receipt className="size-5" />
+          </span>
+          <div className="min-w-0">
+            <Card.Title className="text-[15px] font-bold text-[#172033]">{title}</Card.Title>
+            {subtitle ? <Card.Description className="truncate text-xs">{subtitle}</Card.Description> : null}
+          </div>
+        </Card.Header>
+      ) : null}
+      <Card.Content className="px-5 py-1">
+        {rows.map(([label, value]) => (
+          <div className="flex items-center justify-between gap-4 border-b border-[#eee7e1] py-3.5 last:border-0" key={label}>
+            <span className="text-sm text-muted">{label}</span>
+            <span className="text-right text-sm font-bold text-[#172033]">{value}</span>
+          </div>
+        ))}
+      </Card.Content>
+    </Card>
+  );
+}
+
+function HintCard({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <Card className="rounded-2xl border border-[#ffe1cf] bg-[#fff5ed] shadow-none" variant="secondary">
+      <Card.Content className="flex-row items-center gap-3 text-sm leading-5 text-[#6f3a1a]">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-white text-[#ff5b16] shadow-sm">{icon}</span>
+        <span>{children}</span>
+      </Card.Content>
+    </Card>
   );
 }
 
@@ -501,6 +565,7 @@ export function DeliveryFlow() {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [doorDeadline, setDoorDeadline] = useState<number | null>(null);
   const [doorSeconds, setDoorSeconds] = useState<number | null>(null);
+  const [doorTotalSeconds, setDoorTotalSeconds] = useState<number | null>(null);
   const [checkingDoor, setCheckingDoor] = useState(false);
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
@@ -524,8 +589,15 @@ export function DeliveryFlow() {
         setApprovalDeadline(Date.now() + PREVIEW_APPROVAL_SECONDS * 1000);
         setApprovalTotalSeconds(PREVIEW_APPROVAL_SECONDS);
       }
-      if (preview === "closing") setDoorDeadline(Date.now() + PREVIEW_DOOR_SECONDS * 1000);
-      if (preview && available.includes(preview)) setScreen(preview);
+      if (preview === "closing") {
+        setDoorDeadline(Date.now() + PREVIEW_DOOR_SECONDS * 1000);
+        setDoorTotalSeconds(PREVIEW_DOOR_SECONDS);
+      }
+      if (preview && available.includes(preview)) {
+        setCompartmentCode(PREVIEW_COMPARTMENT_CODE);
+        setPickupCompartmentCode(PREVIEW_COMPARTMENT_CODE);
+        setScreen(preview);
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -568,13 +640,19 @@ export function DeliveryFlow() {
           const reservation = await reserveCompartment(deliverySession.id, deliverySession.guestSessionToken);
           if (cancelled) return;
           setCompartmentCode(reservation.compartmentCode);
-          setDoorDeadline(new Date(reservation.reservationExpiresAt).getTime());
+          const reservationDeadline = new Date(reservation.reservationExpiresAt).getTime();
+          setDoorDeadline(reservationDeadline);
+          setDoorTotalSeconds(secondsUntil(reservationDeadline));
           setScreen("compartment");
           return;
         }
         if (status.status === "Allocated" && status.compartmentCode) {
           setCompartmentCode(status.compartmentCode);
-          if (status.reservationExpiresAt) setDoorDeadline(new Date(status.reservationExpiresAt).getTime());
+          if (status.reservationExpiresAt) {
+            const reservationDeadline = new Date(status.reservationExpiresAt).getTime();
+            setDoorDeadline(reservationDeadline);
+            setDoorTotalSeconds((total) => total ?? secondsUntil(reservationDeadline));
+          }
           setScreen("compartment");
           return;
         }
@@ -696,6 +774,7 @@ export function DeliveryFlow() {
     setImageUrl(null);
     setImageFile(null);
     setDoorDeadline(null);
+    setDoorTotalSeconds(null);
     setDoorSeconds(null);
     setCheckingDoor(false);
     setOpeningDoor(false);
@@ -1097,22 +1176,12 @@ export function DeliveryFlow() {
         return (
           <StatusScreen
             tone="success"
-            icon={<CircleCheckFill className="size-12" />}
+            icon={<CircleCheckFill className="size-11" />}
             title="Lấy hàng thành công"
             description={`Tủ đã xác nhận cửa ngăn ${pickupCompartmentCode} đóng và phiên lấy hàng đã hoàn tất.`}
-          >
-            <Card variant="secondary">
-              <Card.Content className="space-y-3 text-sm">
-                {[['Locker', lockerCode], ['Ngăn', pickupCompartmentCode], ['Trạng thái', 'Đã lấy hàng']].map(([label, value]) => (
-                  <div className="flex justify-between gap-4 border-b border-border pb-3 last:border-0 last:pb-0" key={label}>
-                    <span className="text-muted">{label}</span>
-                    <span className="text-right font-semibold">{value}</span>
-                  </div>
-                ))}
-              </Card.Content>
-            </Card>
-            <Button fullWidth size="lg" onPress={reset}>Hoàn tất</Button>
-          </StatusScreen>
+            details={<InfoRows rows={[["Locker", lockerCode], ["Ngăn", pickupCompartmentCode], ["Trạng thái", "Đã lấy hàng"]]} />}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Hoàn tất</Button>}
+          />
         );
 
       case "receive-open-failed":
@@ -1158,7 +1227,7 @@ export function DeliveryFlow() {
               >
                 {openingDoor ? <><Spinner color="current" size="sm" /> Đang thử mở lại...</> : <><LockOpen className="size-6" /> Thử mở lại</>}
               </Button>
-              <Button fullWidth size="lg" variant="ghost" onPress={reset}>Về trang đầu</Button>
+              <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={reset}>Về trang đầu</Button>
             </div>
           </div>
         );
@@ -1404,168 +1473,199 @@ export function DeliveryFlow() {
             </Card>
 
             <div className="mt-auto pt-6">
-              <Button fullWidth variant="outline" onPress={reset}>Về trang đầu</Button>
+              <Button fullWidth className={SECONDARY_BUTTON_CLASS} variant="outline" onPress={reset}>Về trang đầu</Button>
             </div>
           </div>
         );
 
       case "searching":
         return (
-          <div className="flex flex-1 flex-col items-center justify-center text-center">
-            <Spinner size="xl" />
-            <h1 className="mt-6 text-2xl font-semibold tracking-tight">Đang tìm ngăn trống</h1>
+          <div className="flex flex-1 flex-col items-center justify-center text-center" aria-live="polite">
+            <span className="relative flex size-24 items-center justify-center rounded-[1.8rem] bg-[#fff0e5] text-[#ff5b16] shadow-[0_16px_38px_rgba(255,91,22,.14)] ring-1 ring-[#ffd7bf]">
+              <Box className="size-11" />
+              <span className="absolute -bottom-2 -right-2 flex size-10 items-center justify-center rounded-full bg-white text-[#ff5b16] shadow-[0_8px_20px_rgba(91,40,10,.12)]">
+                <Spinner color="current" size="sm" />
+              </span>
+            </span>
+            <h1 className="mt-7 text-[1.9rem] font-extrabold tracking-[-0.05em] text-[#172033]">Đang tìm ngăn trống</h1>
             <p className="mt-2 max-w-xs text-sm leading-6 text-muted">Hệ thống đang kiểm tra các ngăn khả dụng tại Locker {lockerCode}.</p>
           </div>
         );
 
       case "compartment":
         return (
-          <>
-            <StatusScreen
-              tone="success"
-              icon={<CircleCheckFill className="size-11" />}
-              title={`Ngăn ${compartmentCode} đã sẵn sàng`}
-              description="Cửa ngăn đã mở. Hãy đặt kiện hàng vào ngăn rồi đóng cửa."
-            >
-              <Card variant="secondary">
-                <Card.Content className="space-y-4">
-                  <div className="grid grid-cols-2 divide-x divide-border text-center">
-                    <div className="py-1">
-                      <p className="text-xs text-muted">Locker</p>
-                      <p className="mt-1 text-lg font-semibold">{lockerCode}</p>
+          <StatusScreen
+            tone="success"
+            icon={<LockOpen className="size-10" />}
+            title="Ngăn đã mở"
+            description="Đặt kiện hàng vào ngăn được chỉ định rồi đóng chặt cửa."
+            details={
+              <>
+                <Card className={`gap-0 p-0 ${SURFACE_CARD_CLASS}`}>
+                  <Card.Content className="p-6">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium text-muted">Ngăn tủ</p>
+                        <p className="mt-1 text-[4.2rem] font-black leading-none tracking-[-0.08em] text-[#ff5b16]">{compartmentCode}</p>
+                      </div>
+                      <Chip className="shrink-0" color="success" size="sm" variant="soft">
+                        <LockOpen className="size-3.5" /> Đang mở
+                      </Chip>
                     </div>
-                    <div className="py-1">
-                      <p className="text-xs text-muted">Ngăn</p>
-                      <p className="mt-1 text-lg font-semibold">{compartmentCode}</p>
+                    <div className="mt-4 flex items-center gap-2 text-sm font-medium text-muted">
+                      <MapPin className="size-5 shrink-0 text-[#ff5b16]" />
+                      <span>Tủ Boxora · {lockerCode}</span>
                     </div>
-                  </div>
-                  <div className="h-px bg-border" />
-                  <div className="flex items-center gap-3">
-                    <CircleCheckFill className="size-6 shrink-0 text-success" />
-                    <div>
-                      <p className="font-semibold">Cửa đã mở</p>
-                      <p className="text-sm text-muted">Đặt kiện hàng vào ngăn {compartmentCode}</p>
-                    </div>
-                  </div>
-                </Card.Content>
-              </Card>
-              <Button fullWidth size="lg" onPress={() => setScreen("closing")}>Đã đặt kiện hàng</Button>
-            </StatusScreen>
-          </>
+                  </Card.Content>
+                </Card>
+                <HintCard icon={<Box className="size-5" />}>
+                  <strong>Đặt kiện hàng vào ngăn {compartmentCode}</strong>, sau đó đóng cửa để hoàn tất.
+                </HintCard>
+              </>
+            }
+            actions={
+              <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => setScreen("closing")}>
+                <Check className="size-5" /> Đã đặt kiện hàng
+              </Button>
+            }
+          />
         );
 
       case "closing":
         return (
-          <>
-            <PageIntro
-              icon={<TriangleExclamation className="size-7" />}
-              title="Hãy đóng cửa ngăn"
-              description={`Hệ thống chỉ hoàn tất khi phần cứng xác nhận cửa ${compartmentCode} đã đóng.`}
-            />
-            <Card variant="secondary">
-              <Card.Content className="space-y-5">
-                <div className="flex items-start gap-3">
-                  <TriangleExclamation className="mt-0.5 size-6 shrink-0 text-danger" />
-                  <div>
-                    <p className="font-semibold text-danger">Cửa vẫn đang mở</p>
-                    <p className="mt-1 text-sm text-muted">Vui lòng đóng cửa ngăn trước khi rời đi.</p>
-                  </div>
-                </div>
-                <div className="h-px bg-border" />
-                <div className="text-center">
-                  <p className="text-xs font-medium uppercase tracking-wider text-muted">Thời gian còn lại</p>
-                  <p className="mt-1 font-mono text-4xl font-semibold text-danger">{doorSeconds === null ? "--:--" : formatTime(doorSeconds)}</p>
-                </div>
-              </Card.Content>
-            </Card>
-            <p className="mt-4 text-center text-xs leading-5 text-muted">Nút bên dưới chỉ yêu cầu hệ thống kiểm tra; trạng thái cảm biến cửa mới là xác nhận cuối cùng.</p>
+          <div className="flex flex-1 flex-col">
+            <div className="text-center">
+              <h1 className="text-[1.9rem] font-extrabold tracking-[-0.05em] text-[#172033]">Hãy đóng cửa ngăn {compartmentCode}</h1>
+              <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-muted">
+                Lượt gửi chỉ hoàn tất khi cảm biến xác nhận cửa đã đóng.
+              </p>
+            </div>
+            <div className="mt-6">
+              <CountdownRing
+                ariaLabel={(time) => `Còn ${time} để đóng cửa ngăn`}
+                label="Thời gian còn lại để đóng cửa"
+                pendingLabel="Đang đồng bộ thời hạn..."
+                seconds={doorSeconds}
+                size="md"
+                totalSeconds={doorTotalSeconds}
+              />
+            </div>
+            <div className="mt-6">
+              <HintCard icon={<Lock className="size-5" />}>
+                <strong>Cửa ngăn vẫn đang mở.</strong> Đẩy cửa đóng chặt trước khi rời đi.
+              </HintCard>
+            </div>
             {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
-            <div className="pt-5">
-              <Button fullWidth isPending={checkingDoor} size="lg" onPress={verifyDoor}>
+            <div className="mt-auto pt-6">
+              <Button fullWidth className={PRIMARY_BUTTON_CLASS} isPending={checkingDoor} size="lg" onPress={verifyDoor}>
                 {checkingDoor ? <><Spinner color="current" size="sm" /> Đang kiểm tra cửa...</> : "Tôi đã đóng cửa"}
               </Button>
+              <p className="mt-3 text-center text-xs leading-5 text-muted">Nút này chỉ yêu cầu hệ thống kiểm tra lại; trạng thái cảm biến cửa mới là xác nhận cuối cùng.</p>
             </div>
-          </>
+          </div>
         );
 
       case "success":
         return (
           <StatusScreen
             tone="success"
-            icon={<CircleCheckFill className="size-12" />}
+            icon={<CircleCheckFill className="size-11" />}
             title="Gửi hàng thành công"
             description={`Kiện hàng đã được lưu tại Locker ${lockerCode} và người nhận đã được thông báo.`}
-          >
-            <Card>
-              <Card.Header>
-                <Card.Title className="flex items-center gap-2"><Receipt className="size-5" /> Biên nhận gửi hàng</Card.Title>
-                <Card.Description>{parcelId || "Đã tạo kiện hàng"}</Card.Description>
-              </Card.Header>
-              <Card.Content className="space-y-3 text-sm">
-                {[["Locker", lockerCode], ["Ngăn", compartmentCode], ["Người nhận", formatPhone(phone)], ["Trạng thái", "Đã lưu an toàn"]].map(([label, value]) => (
-                  <div className="flex justify-between gap-4 border-b border-border pb-3 last:border-0 last:pb-0" key={label}>
-                    <span className="text-muted">{label}</span><span className="text-right font-medium">{value}</span>
-                  </div>
-                ))}
-              </Card.Content>
-            </Card>
-            <Card variant="secondary">
-              <Card.Content className="flex items-center gap-3 text-sm">
-                <Bell className="size-5 shrink-0 text-success" /> Đã gửi thông báo cho người nhận
-              </Card.Content>
-            </Card>
-            <Button fullWidth size="lg" onPress={reset}>Hoàn tất</Button>
-            <Button fullWidth size="lg" variant="outline" onPress={() => { reset(); setScreen("recipient"); }}>Gửi kiện khác</Button>
-          </StatusScreen>
+            details={
+              <>
+                <InfoRows
+                  rows={[["Locker", lockerCode], ["Ngăn", compartmentCode], ["Người nhận", formatPhone(phone)], ["Trạng thái", "Đã lưu an toàn"]]}
+                  subtitle={parcelId || "Đã tạo kiện hàng"}
+                  title="Biên nhận gửi hàng"
+                />
+                <HintCard icon={<Bell className="size-5" />}>Đã gửi thông báo cho người nhận.</HintCard>
+              </>
+            }
+            actions={
+              <>
+                <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Hoàn tất</Button>
+                <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => { reset(); setScreen("home"); }}>Gửi kiện khác</Button>
+              </>
+            }
+          />
         );
 
       case "not-found":
         return (
-          <StatusScreen tone="danger" icon={<Xmark className="size-11" />} title="Không tìm thấy người nhận trên hệ thống" description="Số điện thoại chưa thuộc Resident đã đăng ký. Kiểm tra lại trước khi tiếp tục.">
-            <Button fullWidth size="lg" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Kiểm tra lại SĐT</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="danger"
+            icon={<Xmark className="size-10" />}
+            title="Không tìm thấy người nhận"
+            description="Số điện thoại chưa thuộc cư dân đã đăng ký tại tủ này. Kiểm tra lại trước khi tiếp tục."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Kiểm tra lại số điện thoại</Button>}
+          />
         );
 
       case "rejected":
         return (
-          <StatusScreen tone="danger" icon={<Xmark className="size-11" />} title="Người nhận đã từ chối" description="Yêu cầu gửi hàng không được chấp nhận. Lượt gửi này đã kết thúc.">
-            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="danger"
+            icon={<Xmark className="size-10" />}
+            title="Người nhận đã từ chối"
+            description="Yêu cầu gửi hàng không được chấp nhận. Lượt gửi này đã kết thúc."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
         );
 
       case "expired":
         return (
-          <StatusScreen tone="warning" icon={<Clock className="size-11" />} title="Yêu cầu đã hết hạn" description="Người nhận chưa phản hồi trong thời gian quy định. Lượt gửi đã được hủy.">
-            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="warning"
+            icon={<Clock className="size-10" />}
+            title="Yêu cầu đã hết hạn"
+            description="Người nhận chưa phản hồi trong thời gian quy định. Lượt gửi đã được hủy."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
         );
 
       case "full":
         return (
-          <StatusScreen tone="warning" icon={<Box className="size-11" />} title="Locker đã hết ngăn trống" description={`Hiện tại ${lockerCode} không còn ngăn khả dụng. Vui lòng thử lại sau.`}>
-            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="warning"
+            icon={<Box className="size-10" />}
+            title="Locker đã hết ngăn trống"
+            description={`Hiện tại ${lockerCode} không còn ngăn khả dụng. Vui lòng thử lại sau.`}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
         );
 
       case "door-timeout":
         return (
-          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Lượt gửi chưa hoàn tất" description={`Cửa ngăn chưa được đóng trong thời gian cho phép hoặc tủ gặp sự cố. Cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}>
-            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="danger"
+            icon={<TriangleExclamation className="size-10" />}
+            title="Lượt gửi chưa hoàn tất"
+            description={`Cửa ngăn chưa được đóng trong thời gian cho phép hoặc tủ gặp sự cố. Cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
         );
 
       case "invalid-locker":
         return (
-          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Link tủ không hợp lệ" description="Không xác định được tủ từ đường dẫn này. Hãy quét lại mã QR dán trên tủ Boxora để bắt đầu.">
-            <Button fullWidth size="lg" variant="outline" onPress={() => window.location.reload()}>Tải lại trang</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="danger"
+            icon={<TriangleExclamation className="size-10" />}
+            title="Link tủ không hợp lệ"
+            description="Không xác định được tủ từ đường dẫn này. Hãy quét lại mã QR dán trên tủ Boxora để bắt đầu."
+            actions={<Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => window.location.reload()}>Tải lại trang</Button>}
+          />
         );
 
       case "locker-unavailable":
         return (
-          <StatusScreen tone="warning" icon={<Lock className="size-11" />} title="Tủ tạm ngưng phục vụ" description={`Locker ${lockerCode} hiện không nhận gửi hàng. Vui lòng thử lại sau hoặc dùng tủ khác.`}>
-            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
-          </StatusScreen>
+          <StatusScreen
+            tone="warning"
+            icon={<Lock className="size-10" />}
+            title="Tủ tạm ngưng phục vụ"
+            description={`Locker ${lockerCode} hiện không nhận gửi hàng. Vui lòng thử lại sau hoặc dùng tủ khác.`}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
         );
     }
   })();
