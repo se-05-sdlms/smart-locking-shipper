@@ -68,24 +68,32 @@ type Screen =
   | "rejected"
   | "expired"
   | "full"
-  | "door-timeout";
+  | "door-timeout"
+  | "invalid-locker"
+  | "locker-unavailable";
 
-const APPROVAL_DURATION_SECONDS = 10 * 60;
+const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
+// Preview links (?preview=<screen>) are a design aid only and must never be reachable in production.
+const PREVIEW_ENABLED = process.env.NODE_ENV !== "production";
+const PREVIEW_APPROVAL_SECONDS = 10 * 60;
+const PREVIEW_DOOR_SECONDS = 5 * 60;
 
 const formatTime = (seconds: number) =>
   `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 
+const secondsUntil = (deadline: number) => Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+
 const normalizePickupCode = (value: string) =>
   value.replace(/\D/g, "").slice(0, 6);
 
-function ApprovalCountdown({ seconds }: { seconds: number }) {
+function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; totalSeconds: number | null }) {
   const radius = 112;
   const circumference = 2 * Math.PI * radius;
-  const progress = Math.max(0, Math.min(1, seconds / APPROVAL_DURATION_SECONDS));
+  const progress = seconds === null || !totalSeconds ? 1 : Math.max(0, Math.min(1, seconds / totalSeconds));
 
   return (
     <div
-      aria-label={`Còn ${formatTime(seconds)} để cư dân phê duyệt`}
+      aria-label={seconds === null ? "Đang đồng bộ thời hạn phê duyệt" : `Còn ${formatTime(seconds)} để cư dân phê duyệt`}
       className="relative mx-auto aspect-square w-full max-w-[17rem]"
       role="timer"
     >
@@ -112,10 +120,16 @@ function ApprovalCountdown({ seconds }: { seconds: number }) {
       </svg>
       <div className="absolute inset-[2.25rem] flex flex-col items-center justify-center rounded-full bg-[radial-gradient(circle_at_50%_30%,#fff_0%,#fff9f5_58%,#fff1e9_100%)] text-center shadow-[inset_0_0_0_1px_rgba(255,120,42,.08)]">
         <Clock className="mb-2 size-8 text-[#ff5b16]" />
-        <span className="font-mono text-[2.7rem] leading-none font-bold tracking-[-0.06em] text-[#172033] tabular-nums">
-          {formatTime(seconds)}
+        {seconds === null ? (
+          <Spinner className="my-2" color="current" size="lg" />
+        ) : (
+          <span className="font-mono text-[2.7rem] leading-none font-bold tracking-[-0.06em] text-[#172033] tabular-nums">
+            {formatTime(seconds)}
+          </span>
+        )}
+        <span className="mt-2 text-xs font-medium text-muted">
+          {seconds === null ? "Đang đồng bộ thời hạn..." : "Đang chờ cư dân phê duyệt"}
         </span>
-        <span className="mt-2 text-xs font-medium text-muted">Đang chờ cư dân phê duyệt</span>
       </div>
     </div>
   );
@@ -179,7 +193,7 @@ function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisab
         <Image alt="Logo Boxora" className="shrink-0" height={44} priority src="/boxora-logo.svg" width={44} />
         <div className="min-w-0">
           <p className="truncate text-[1.35rem] font-extrabold leading-6 tracking-[-0.035em] text-[#f55a12]">BOXORA</p>
-          <p className="truncate text-sm font-medium text-[#697386]">Tủ {lockerCode}</p>
+          <p className="truncate text-sm font-medium text-[#697386]">{lockerCode ? `Tủ ${lockerCode}` : "Chưa xác định tủ"}</p>
         </div>
       </div>
     </header>
@@ -209,8 +223,8 @@ function LockerCard({ lockerCode }: { lockerCode: string }) {
           <Card.Title className="truncate text-[15px] font-bold text-[#172033]">Tủ Boxora {lockerCode}</Card.Title>
           <Card.Description className="text-xs">Điểm tủ từ mã QR đã quét</Card.Description>
         </div>
-        <Chip className="shrink-0" color="success" size="sm" variant="soft">
-          <Check className="size-3" /> Đã xác nhận
+        <Chip className="shrink-0" size="sm" variant="soft">
+          Mã QR
         </Chip>
       </Card.Header>
       <Card.Content className="px-4 pb-1 pt-0">
@@ -466,7 +480,7 @@ function StatusScreen({
 
 export function DeliveryFlow() {
   const [screen, setScreen] = useState<Screen>("welcome");
-  const [lockerCode, setLockerCode] = useState("LK-01");
+  const [lockerCode, setLockerCode] = useState("");
   const [phone, setPhone] = useState("");
   const [phoneConfirmed, setPhoneConfirmed] = useState(false);
   const [phoneError, setPhoneError] = useState("");
@@ -475,7 +489,9 @@ export function DeliveryFlow() {
   const [compartmentCode, setCompartmentCode] = useState("");
   const [parcelId, setParcelId] = useState("");
   const [approvalDeadline, setApprovalDeadline] = useState<number | null>(null);
-  const [approvalSeconds, setApprovalSeconds] = useState(APPROVAL_DURATION_SECONDS);
+  const [approvalSeconds, setApprovalSeconds] = useState<number | null>(null);
+  const [approvalTotalSeconds, setApprovalTotalSeconds] = useState<number | null>(null);
+  const submittedAt = useRef<number | null>(null);
   const [isStartingDelivery, setIsStartingDelivery] = useState(false);
   const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [otp, setOtp] = useState("");
@@ -483,7 +499,8 @@ export function DeliveryFlow() {
   const [isVerifyingPickup, setIsVerifyingPickup] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [doorSeconds, setDoorSeconds] = useState(298);
+  const [doorDeadline, setDoorDeadline] = useState<number | null>(null);
+  const [doorSeconds, setDoorSeconds] = useState<number | null>(null);
   const [checkingDoor, setCheckingDoor] = useState(false);
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
@@ -492,27 +509,34 @@ export function DeliveryFlow() {
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
-    const preview = searchParams.get("preview") as Screen | null;
-    const previewPhone = searchParams.get("phone");
-    const scannedLockerCode = searchParams.get("locker")?.trim();
-    const available: Screen[] = ["welcome", "home", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "receive-success", "recipient", "parcel", "confirm", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout"];
+    const scannedLockerCode = searchParams.get("locker")?.trim() ?? "";
+    const preview = PREVIEW_ENABLED ? (searchParams.get("preview") as Screen | null) : null;
+    const previewPhone = PREVIEW_ENABLED ? searchParams.get("phone") : null;
+    const available: Screen[] = ["welcome", "home", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "receive-success", "recipient", "parcel", "confirm", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout", "invalid-locker", "locker-unavailable"];
     const timer = window.setTimeout(() => {
-      if (scannedLockerCode) setLockerCode(scannedLockerCode);
+      if (!LOCKER_CODE_PATTERN.test(scannedLockerCode)) {
+        setScreen("invalid-locker");
+        return;
+      }
+      setLockerCode(scannedLockerCode);
       if (previewPhone) setPhone(formatPhone(previewPhone));
       if (preview === "waiting") {
-        setApprovalDeadline(Date.now() + APPROVAL_DURATION_SECONDS * 1000);
-        setApprovalSeconds(APPROVAL_DURATION_SECONDS);
+        setApprovalDeadline(Date.now() + PREVIEW_APPROVAL_SECONDS * 1000);
+        setApprovalTotalSeconds(PREVIEW_APPROVAL_SECONDS);
       }
+      if (preview === "closing") setDoorDeadline(Date.now() + PREVIEW_DOOR_SECONDS * 1000);
       if (preview && available.includes(preview)) setScreen(preview);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    if (screen !== "closing" || doorSeconds <= 0) return;
-    const timer = window.setInterval(() => setDoorSeconds((time) => time - 1), 1000);
+    if (screen !== "closing" || !doorDeadline) return;
+    const updateDoorCountdown = () => setDoorSeconds(secondsUntil(doorDeadline));
+    updateDoorCountdown();
+    const timer = window.setInterval(updateDoorCountdown, 1000);
     return () => window.clearInterval(timer);
-  }, [screen, doorSeconds]);
+  }, [screen, doorDeadline]);
 
   useEffect(() => {
     if (screen !== "waiting" || !deliverySession) return;
@@ -535,18 +559,22 @@ export function DeliveryFlow() {
         setApiError("");
         if (status.approvalExpiresAt) {
           const deadline = new Date(status.approvalExpiresAt).getTime();
+          const startedAt = submittedAt.current ?? Date.now();
           setApprovalDeadline(deadline);
-          setApprovalSeconds(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+          setApprovalSeconds(secondsUntil(deadline));
+          setApprovalTotalSeconds((total) => total ?? Math.max(1, Math.round((deadline - startedAt) / 1000)));
         }
         if (status.status === "Approved") {
           const reservation = await reserveCompartment(deliverySession.id, deliverySession.guestSessionToken);
           if (cancelled) return;
           setCompartmentCode(reservation.compartmentCode);
+          setDoorDeadline(new Date(reservation.reservationExpiresAt).getTime());
           setScreen("compartment");
           return;
         }
         if (status.status === "Allocated" && status.compartmentCode) {
           setCompartmentCode(status.compartmentCode);
+          if (status.reservationExpiresAt) setDoorDeadline(new Date(status.reservationExpiresAt).getTime());
           setScreen("compartment");
           return;
         }
@@ -590,7 +618,7 @@ export function DeliveryFlow() {
     if (screen !== "waiting" || !approvalDeadline) return;
 
     const updateCountdown = () => {
-      const remaining = Math.max(0, Math.ceil((approvalDeadline - Date.now()) / 1000));
+      const remaining = secondsUntil(approvalDeadline);
       setApprovalSeconds(remaining);
       if (remaining === 0) setScreen("expired");
     };
@@ -657,7 +685,9 @@ export function DeliveryFlow() {
     setCompartmentCode("");
     setParcelId("");
     setApprovalDeadline(null);
-    setApprovalSeconds(APPROVAL_DURATION_SECONDS);
+    setApprovalSeconds(null);
+    setApprovalTotalSeconds(null);
+    submittedAt.current = null;
     setIsStartingDelivery(false);
     setIsSendingRequest(false);
     setOtp("");
@@ -665,7 +695,8 @@ export function DeliveryFlow() {
     setIsVerifyingPickup(false);
     setImageUrl(null);
     setImageFile(null);
-    setDoorSeconds(298);
+    setDoorDeadline(null);
+    setDoorSeconds(null);
     setCheckingDoor(false);
     setOpeningDoor(false);
     setPickupSession(null);
@@ -745,7 +776,13 @@ export function DeliveryFlow() {
       setDeliverySession(session);
       setScreen("recipient");
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Không thể khởi tạo phiên gửi hàng.");
+      if (error instanceof DeliveryApiError && error.code === "locker/not_found") {
+        setScreen("invalid-locker");
+      } else if (error instanceof DeliveryApiError && error.code === "locker/not_operational") {
+        setScreen("locker-unavailable");
+      } else {
+        setApiError(error instanceof Error ? error.message : "Không thể khởi tạo phiên gửi hàng.");
+      }
     } finally {
       setIsStartingDelivery(false);
     }
@@ -767,8 +804,12 @@ export function DeliveryFlow() {
         parcelImageUrl,
         phoneDigits(phone),
       );
-      setApprovalDeadline(Date.now() + APPROVAL_DURATION_SECONDS * 1000);
-      setApprovalSeconds(APPROVAL_DURATION_SECONDS);
+      // The approval window comes from the active system policy; the countdown starts once
+      // the backend reports approvalExpiresAt on the first status poll.
+      submittedAt.current = Date.now();
+      setApprovalDeadline(null);
+      setApprovalSeconds(null);
+      setApprovalTotalSeconds(null);
       setScreen("waiting");
     } catch (error) {
       if (error instanceof DeliveryApiError && error.status === 404) {
@@ -818,6 +859,7 @@ export function DeliveryFlow() {
       expired: "home",
       full: "home",
       "door-timeout": "home",
+      "locker-unavailable": "welcome",
       success: "home",
     };
     setScreen(previous[screen] ?? "home");
@@ -857,11 +899,7 @@ export function DeliveryFlow() {
                 )}
               </Button>
               {apiError ? <div className="mt-3"><ApiErrorCard message={apiError} /></div> : null}
-              <Button isDisabled fullWidth className="mt-2 opacity-100" size="sm" variant="ghost">
-                <span className="font-semibold text-[#f55a12]">Chọn locker khác</span>
-                <ArrowChevronRight className="size-4 text-[#f55a12]" />
-              </Button>
-              <p className="mt-2 text-center text-xs text-muted">Không cần tài khoản · Chỉ mất khoảng 2 phút</p>
+              <p className="mt-3 text-center text-xs text-muted">Không cần tài khoản · Muốn dùng tủ khác, hãy quét mã QR trên tủ đó</p>
             </div>
           </div>
         );
@@ -1331,7 +1369,7 @@ export function DeliveryFlow() {
       case "waiting":
         return (
           <div className="flex flex-1 flex-col">
-            <ApprovalCountdown seconds={approvalSeconds} />
+            <ApprovalCountdown seconds={approvalSeconds} totalSeconds={approvalTotalSeconds} />
 
             <Card className="mx-auto mt-5 w-fit rounded-full border border-[#f8e1d2] bg-[#fff7f1] px-1 py-0 shadow-[0_10px_28px_rgba(103,44,10,.08)]">
               <Card.Content className="flex-row items-center gap-2.5 px-3 py-2.5">
@@ -1436,7 +1474,7 @@ export function DeliveryFlow() {
                 <div className="h-px bg-border" />
                 <div className="text-center">
                   <p className="text-xs font-medium uppercase tracking-wider text-muted">Thời gian còn lại</p>
-                  <p className="mt-1 font-mono text-4xl font-semibold text-danger">{formatTime(doorSeconds)}</p>
+                  <p className="mt-1 font-mono text-4xl font-semibold text-danger">{doorSeconds === null ? "--:--" : formatTime(doorSeconds)}</p>
                 </div>
               </Card.Content>
             </Card>
@@ -1511,7 +1549,21 @@ export function DeliveryFlow() {
 
       case "door-timeout":
         return (
-          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Quá 5 phút cửa chưa đóng" description={`Lượt gửi không hoàn tất và cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}>
+          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Lượt gửi chưa hoàn tất" description={`Cửa ngăn chưa được đóng trong thời gian cho phép hoặc tủ gặp sự cố. Cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}>
+            <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
+          </StatusScreen>
+        );
+
+      case "invalid-locker":
+        return (
+          <StatusScreen tone="danger" icon={<TriangleExclamation className="size-11" />} title="Link tủ không hợp lệ" description="Không xác định được tủ từ đường dẫn này. Hãy quét lại mã QR dán trên tủ Boxora để bắt đầu.">
+            <Button fullWidth size="lg" variant="outline" onPress={() => window.location.reload()}>Tải lại trang</Button>
+          </StatusScreen>
+        );
+
+      case "locker-unavailable":
+        return (
+          <StatusScreen tone="warning" icon={<Lock className="size-11" />} title="Tủ tạm ngưng phục vụ" description={`Locker ${lockerCode} hiện không nhận gửi hàng. Vui lòng thử lại sau hoặc dùng tủ khác.`}>
             <Button fullWidth size="lg" onPress={reset}>Về trang đầu</Button>
           </StatusScreen>
         );
@@ -1530,7 +1582,7 @@ export function DeliveryFlow() {
   return (
     <div className="min-h-dvh bg-surface-secondary sm:py-8">
       <div className="mx-auto flex min-h-dvh w-full max-w-lg flex-col bg-background sm:min-h-[calc(100dvh-4rem)] sm:overflow-hidden sm:rounded-3xl sm:border sm:border-border sm:shadow-sm">
-        <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
+        <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing", "invalid-locker"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
         <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : ["receive-details", "receive-open-failed", "receive-opened", "receive-success"].includes(screen) ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
           {content}
         </main>
