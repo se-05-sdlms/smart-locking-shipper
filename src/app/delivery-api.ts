@@ -85,10 +85,41 @@ export async function uploadParcelFile(file: File): Promise<string> {
   return result.url;
 }
 
+export type WaybillOcrResult = {
+  status: "Succeeded" | "Failed";
+  phones: string[];
+  isMasked: boolean;
+  parcelImageUrl: string;
+};
+
+// Uploads the parcel photo and reads the recipient phone number from the waybill on it.
+// A "Failed" status is not an error: the Shipper simply types the number.
+export async function scanWaybill(requestId: string, guestSessionToken: string, file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return request<WaybillOcrResult>(`/backend/delivery-requests/${requestId}:waybill-ocr`, {
+    method: "POST",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+    body: formData,
+  });
+}
+
+export const resolveRecipient = (requestId: string, guestSessionToken: string, phone: string) =>
+  request<{ fullName: string }>(`/backend/delivery-requests/${requestId}:resolve-recipient`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Guest-Session-Token": guestSessionToken,
+    },
+    body: JSON.stringify({ phone }),
+  });
+
+// parcelImageUrl is omitted when the photo was already stored by scanWaybill.
 export const submitDelivery = (
   requestId: string,
   guestSessionToken: string,
-  parcelImageUrl: string,
+  parcelImageUrl: string | null,
   recipientPhone: string,
 ) =>
   request<DeliverySummary>(`/backend/delivery-requests/${requestId}:submit`, {
@@ -97,7 +128,7 @@ export const submitDelivery = (
       "Content-Type": "application/json",
       "X-Guest-Session-Token": guestSessionToken,
     },
-    body: JSON.stringify({ parcelImageUrl, recipientPhone }),
+    body: JSON.stringify({ ...(parcelImageUrl ? { parcelImageUrl } : {}), recipientPhone }),
   });
 
 export const getDeliveryStatus = (requestId: string, guestSessionToken: string) =>
