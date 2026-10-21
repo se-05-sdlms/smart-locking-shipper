@@ -95,7 +95,7 @@ const OCR_NOTICES = {
   failed: "Quét vận đơn thất bại. Vui lòng nhập số điện thoại người nhận thủ công.",
   masked: "Vận đơn đã che bớt số điện thoại. Vui lòng nhập đầy đủ số điện thoại người nhận.",
 } as const;
-type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "limit" | "error";
+type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "cannot-receive" | "limit" | "error";
 type ScanStatus = "idle" | "scanning" | "ready" | "error";
 
 const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
@@ -684,6 +684,8 @@ export function DeliveryFlow() {
         setRecipientName("");
         if (error instanceof DeliveryApiError && error.code === "delivery/recipient_not_found") {
           setRecipientStatus("not-found");
+        } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
+          setRecipientStatus("cannot-receive");
         } else if (error instanceof DeliveryApiError && error.code === "delivery/lookup_limit_reached") {
           setRecipientStatus("limit");
         } else {
@@ -992,6 +994,9 @@ export function DeliveryFlow() {
     } catch (error) {
       if (error instanceof DeliveryApiError && error.status === 404) {
         setScreen("not-found");
+      } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
+        setRecipientStatus("cannot-receive");
+        setRecipientName("");
       } else {
         setApiError(error instanceof Error ? error.message : "Không thể gửi yêu cầu giao hàng.");
       }
@@ -1428,6 +1433,9 @@ export function DeliveryFlow() {
                   ) : null}
                   {recipientStatus === "not-found" ? (
                     <p className="font-medium text-[#e5484d]">Số này chưa đăng ký nhận hàng tại tủ này. Kiểm tra lại số trên vận đơn.</p>
+                  ) : null}
+                  {recipientStatus === "cannot-receive" ? (
+                    <p className="font-medium text-[#e5484d]">Cư dân này tạm thời không thể nhận thêm kiện hàng. Vui lòng liên hệ cư dân hoặc ban quản lý.</p>
                   ) : null}
                   {recipientStatus === "limit" ? (
                     <p className="font-medium text-[#e5484d]">Đã hết số lần tra cứu của phiên này. Vui lòng báo sự cố hoặc bắt đầu phiên gửi mới.</p>
