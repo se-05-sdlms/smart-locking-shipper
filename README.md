@@ -1,6 +1,6 @@
 # SmartLock Shipper Mobile Web
 
-Mobile-first guest flow for shippers delivering parcels to Smart Delivery Lockers.
+Mobile-first guest flow for shippers delivering parcels to and collecting return parcels from Smart Delivery Lockers.
 
 ## Run locally
 
@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Use phone `0901234567` for the successful mock flow, or open **Demo** to preview operational and exception states.
+Open [http://localhost:3000](http://localhost:3000) with a locker code, for example `?locker=LK-01`. The application uses the backend configured by `BACKEND_URL` (default: `http://127.0.0.1:5005/api`).
 
 ## Stack
 
