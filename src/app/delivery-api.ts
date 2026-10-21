@@ -122,6 +122,30 @@ export const openReturnPickup = (session: ReturnPickupSession) =>
     method: "POST", headers: { "X-Guest-Session-Token": session.guestSessionToken },
   });
 
+// Matches the incident types accepted by the backend for guest reports.
+export type GuestIncidentType = "Compartment" | "Locker" | "Parcel" | "Return" | "Other";
+
+export type GuestIncident = {
+  id: string;
+  referenceCode: string;
+  status: number;
+  createdAt: string;
+};
+
+export const reportGuestIncident = (body: {
+  lockerCode: string;
+  type: GuestIncidentType;
+  title: string;
+  description: string;
+  deliveryRequestId?: string;
+  returnRequestId?: string;
+}) =>
+  request<GuestIncident>("/backend/incidents/guest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
 export const getReturnPickup = (session: ReturnPickupSession) =>
   request<ReturnPickupSession>(`/backend/return-pickup-sessions/${session.returnRequestId}`, {
     method: "GET", headers: { "X-Guest-Session-Token": session.guestSessionToken },
