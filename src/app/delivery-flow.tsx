@@ -5,7 +5,6 @@ import {
   Card,
   Chip,
   Description,
-  FieldError,
   Form,
   Input,
   InputOTP,
@@ -37,8 +36,8 @@ import {
   Xmark,
 } from "@gravity-ui/icons";
 import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
-import type { ChangeEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import {
   DeliveryApiError,
   getDeliveryStatus,
@@ -47,6 +46,8 @@ import {
   openReturnPickup,
   reportGuestIncident,
   reserveCompartment,
+  resolveRecipient,
+  scanWaybill,
   submitDelivery,
   uploadParcelFile,
   validateReturnPickup,
@@ -55,7 +56,6 @@ import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./
 
 type Screen =
   | "welcome"
-  | "home"
   | "receive-otp"
   | "receive-details"
   | "receive-open-failed"
@@ -63,7 +63,6 @@ type Screen =
   | "receive-success"
   | "recipient"
   | "parcel"
-  | "confirm"
   | "waiting"
   | "searching"
   | "compartment"
@@ -88,6 +87,16 @@ const INCIDENT_TYPES: { value: GuestIncidentType; label: string; hint: string }[
 ];
 const INCIDENT_DESCRIPTION_MIN = 10;
 const INCIDENT_DESCRIPTION_MAX = 4000;
+
+const DRAFT_STORAGE_KEY = "boxora.delivery.draft";
+const PHONE_PATTERN = /^0\d{9}$/;
+const OCR_NOTICES = {
+  success: "Quét vận đơn thành công. Vui lòng kiểm tra lại số điện thoại người nhận.",
+  failed: "Quét vận đơn thất bại. Vui lòng nhập số điện thoại người nhận thủ công.",
+  masked: "Vận đơn đã che bớt số điện thoại. Vui lòng nhập đầy đủ số điện thoại người nhận.",
+} as const;
+type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "limit" | "error";
+type ScanStatus = "idle" | "scanning" | "ready" | "error";
 
 const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
 // Preview links (?preview=<screen>) are a design aid only and must never be reachable in production.
@@ -187,6 +196,15 @@ function ApprovalCountdown({ seconds, totalSeconds }: { seconds: number | null; 
 
 const phoneDigits = (value: string) => value.replace(/\D/g, "");
 
+// Accepts typed or pasted input; +84901234567 becomes 0901 234 567.
+const normalizePhoneInput = (value: string) => {
+  let digits = phoneDigits(value);
+  if (value.trim().startsWith("+84") || (digits.startsWith("84") && digits.length > 10)) {
+    digits = `0${digits.slice(2)}`;
+  }
+  return formatPhone(digits);
+};
+
 const formatPhone = (value: string) => {
   const digits = phoneDigits(value).slice(0, 11);
   return [digits.slice(0, 4), digits.slice(4, 7), digits.slice(7, 10), digits.slice(10)]
@@ -194,13 +212,15 @@ const formatPhone = (value: string) => {
     .join(" ");
 };
 
-async function cropImageToSquare(file: File) {
+const MAX_PARCEL_IMAGE_SIDE = 1600;
+
+// Keeps the whole photo (the waybill must stay readable) and only shrinks it so it uploads fast on mobile data.
+async function prepareParcelImage(file: File) {
   const image = await createImageBitmap(file, { imageOrientation: "from-image" });
-  const cropSize = Math.min(image.width, image.height);
-  const outputSize = Math.min(cropSize, 1080);
+  const scale = Math.min(1, MAX_PARCEL_IMAGE_SIDE / Math.max(image.width, image.height));
   const canvas = document.createElement("canvas");
-  canvas.width = outputSize;
-  canvas.height = outputSize;
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
 
   const context = canvas.getContext("2d");
   if (!context) {
@@ -208,28 +228,18 @@ async function cropImageToSquare(file: File) {
     throw new Error("Không thể xử lý ảnh kiện hàng.");
   }
 
-  context.drawImage(
-    image,
-    (image.width - cropSize) / 2,
-    (image.height - cropSize) / 2,
-    cropSize,
-    cropSize,
-    0,
-    0,
-    outputSize,
-    outputSize,
-  );
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
   image.close();
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (result) => result ? resolve(result) : reject(new Error("Không thể xử lý ảnh kiện hàng.")),
       "image/jpeg",
-      0.9,
+      0.85,
     );
   });
   const filename = file.name.replace(/\.[^.]+$/, "") || "kien-hang";
-  return new File([blob], `${filename}-square.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  return new File([blob], `${filename}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
 }
 
 function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisabled?: boolean; lockerCode: string; goBack: () => void }) {
@@ -247,101 +257,6 @@ function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisab
         </div>
       </div>
     </header>
-  );
-}
-
-function LockerCard({ lockerCode }: { lockerCode: string }) {
-  return (
-    <Card className="gap-0 overflow-hidden rounded-[1.6rem] border border-[#f1e9e3] bg-white p-0 shadow-[0_16px_45px_rgba(72,35,14,.08)]">
-      <Card.Header className="flex-row items-center gap-3 px-4 py-4">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff2e9] text-[#f55a12]">
-          <Box className="size-6" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <Card.Title className="truncate text-[15px] font-bold text-[#172033]">Tủ Boxora {lockerCode}</Card.Title>
-          <Card.Description className="text-xs">Điểm tủ từ mã QR đã quét</Card.Description>
-        </div>
-        <Chip className="shrink-0" size="sm" variant="soft">
-          Mã QR
-        </Chip>
-      </Card.Header>
-      <Card.Content className="px-4 pb-1 pt-0">
-        <div className="flex items-center gap-3 border-t border-[#eee7e1] py-3 text-[12px] font-medium text-[#303747]">
-          <Clock className="size-5 shrink-0 text-[#f55a12]" />
-          <span>Kiểm tra đúng mã tủ trước khi tiếp tục</span>
-        </div>
-      </Card.Content>
-    </Card>
-  );
-}
-
-const SEND_SLIDES = [
-  { image: "/carousel/send-fast.png", title: "Gửi hàng nhanh chóng tại Boxora" },
-  { image: "/carousel/send-simple.png", title: "Thao tác đơn giản, bỏ hàng trong tích tắc" },
-  { image: "/carousel/send-convenient.png", title: "Tiện lợi hơn cho mọi lần giao nhận" },
-] as const;
-
-function SendCarousel() {
-  const [active, setActive] = useState(0);
-  const dragStartX = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const timer = window.setInterval(() => setActive((index) => (index + 1) % SEND_SLIDES.length), 5000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-
-  const finishSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragStartX.current === null) return;
-    const distance = event.clientX - dragStartX.current;
-    dragStartX.current = null;
-    if (Math.abs(distance) < 40) return;
-    setActive((index) => (index + (distance < 0 ? 1 : SEND_SLIDES.length - 1)) % SEND_SLIDES.length);
-  };
-
-  return (
-    <section aria-label="Giới thiệu dịch vụ gửi hàng" aria-roledescription="carousel">
-      <div
-        className="relative aspect-[1.9/1] touch-pan-y overflow-hidden rounded-[1.45rem] bg-[#fff1e6] shadow-[0_12px_35px_rgba(115,49,8,.09)]"
-        onPointerCancel={() => { dragStartX.current = null; }}
-        onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); dragStartX.current = event.clientX; }}
-        onPointerUp={finishSwipe}
-      >
-        {SEND_SLIDES.map((slide, index) => (
-          <div
-            aria-hidden={index !== active}
-            className={`absolute inset-0 transition-opacity duration-500 ${index === active ? "opacity-100" : "pointer-events-none opacity-0"}`}
-            key={slide.image}
-          >
-            <Image
-              alt={index === active ? slide.title : ""}
-              className="pointer-events-none object-cover select-none"
-              fill
-              priority={index === 0}
-              sizes="(max-width: 640px) calc(100vw - 40px), 456px"
-              src={slide.image}
-            />
-            <div aria-hidden="true" className="absolute inset-y-0 left-0 w-[55%] bg-linear-to-r from-[#fff8f1]/96 via-[#fff7ef]/75 to-transparent" />
-            <p className="absolute left-6 top-1/2 z-10 w-[40%] -translate-y-1/2 text-[clamp(.95rem,4vw,1.15rem)] leading-[1.25] font-bold tracking-[-0.035em] text-[#172033]">
-              {slide.title}
-            </p>
-          </div>
-        ))}
-        <div className="absolute bottom-4 left-6 z-20 flex gap-1.5">
-          {SEND_SLIDES.map((slide, index) => (
-            <button
-              aria-label={`Chuyển đến slide ${index + 1}: ${slide.title}`}
-              aria-pressed={index === active}
-              className={`h-1.5 rounded-full transition-all ${index === active ? "w-7 bg-[#ff5b16]" : "w-1.5 bg-[#f7bc94]"}`}
-              key={slide.image}
-              type="button"
-              onClick={() => setActive(index)}
-            />
-          ))}
-        </div>
-      </div>
-      <span aria-live="polite" className="sr-only">{SEND_SLIDES[active].title}</span>
-    </section>
   );
 }
 
@@ -422,52 +337,12 @@ function WelcomeScreen({
   );
 }
 
-function RecipientCard({ phone }: { phone: string }) {
-  return (
-    <Card className="rounded-[1.6rem] border border-[#f4dfd0] bg-white shadow-[0_14px_38px_rgba(101,45,12,.09)]">
-      <Card.Content className="flex-row items-center gap-4">
-        <span className="flex size-14 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e5] text-[#f55a12]">
-          <Handset className="size-6" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-medium text-muted">Số điện thoại người nhận</p>
-          <p className="text-sm text-muted">{formatPhone(phone)}</p>
-        </div>
-        <Chip color="success" size="sm" variant="soft">
-          <Check className="size-3" /> Đã nhập
-        </Chip>
-      </Card.Content>
-    </Card>
-  );
-}
-
 function ApiErrorCard({ message }: { message: string }) {
   return (
     <Card variant="secondary">
       <Card.Content className="flex items-start gap-3 text-sm">
         <TriangleExclamation className="mt-0.5 size-5 shrink-0 text-danger" />
         <span>{message}</span>
-      </Card.Content>
-    </Card>
-  );
-}
-
-function ParcelPreview({ imageUrl }: { imageUrl: string | null }) {
-  return (
-    <Card className="overflow-hidden rounded-[1.7rem] border border-[#f2e4da] bg-white p-0 shadow-[0_16px_42px_rgba(85,38,9,.1)]">
-      <Card.Content className="p-0">
-        <div className="relative flex aspect-square items-center justify-center overflow-hidden bg-[#fff6ed]">
-          {imageUrl?.startsWith("blob:") ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img alt="Ảnh kiện hàng đã chọn" className="h-full w-full object-cover" src={imageUrl} />
-          ) : (
-            <Image alt="Ảnh kiện hàng đã chọn" className="object-cover" fill src={imageUrl ?? "/illustrations/parcel-photo-guide.png"} />
-          )}
-          <div aria-hidden="true" className="absolute inset-0 ring-1 ring-inset ring-black/5" />
-          <Chip className="absolute right-3 top-3 shadow-sm" color="success" size="sm" variant="primary">
-            <Check className="size-3" /> Đã sẵn sàng
-          </Chip>
-        </div>
       </Card.Content>
     </Card>
   );
@@ -491,7 +366,7 @@ function ParcelPhotoGuide() {
       <span aria-hidden="true" className="absolute bottom-5 right-5 size-10 rounded-br-xl border-b-3 border-r-3 border-white drop-shadow-md" />
       <div className="absolute inset-x-7 bottom-5 flex items-center justify-center gap-2 rounded-full border border-white/45 bg-[#2d1609]/58 px-4 py-2.5 text-center text-sm font-semibold text-white shadow-lg backdrop-blur-md">
         <Camera className="size-4 shrink-0" />
-        Đặt toàn bộ kiện hàng trong khung
+        Chụp mặt có vận đơn, chữ thật rõ
       </div>
     </div>
   );
@@ -575,8 +450,14 @@ export function DeliveryFlow() {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [lockerCode, setLockerCode] = useState("");
   const [phone, setPhone] = useState("");
-  const [phoneConfirmed, setPhoneConfirmed] = useState(false);
-  const [phoneError, setPhoneError] = useState("");
+  const [recipientName, setRecipientName] = useState("");
+  const [recipientStatus, setRecipientStatus] = useState<RecipientStatus>("idle");
+  const [recipientMessage, setRecipientMessage] = useState("");
+  const [lookupTick, setLookupTick] = useState(0);
+  const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
+  const [ocrNotice, setOcrNotice] = useState<"" | keyof typeof OCR_NOTICES>("");
+  const [ocrPhones, setOcrPhones] = useState<string[]>([]);
+  const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [apiError, setApiError] = useState("");
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
   const [compartmentCode, setCompartmentCode] = useState("");
@@ -585,7 +466,6 @@ export function DeliveryFlow() {
   const [approvalSeconds, setApprovalSeconds] = useState<number | null>(null);
   const [approvalTotalSeconds, setApprovalTotalSeconds] = useState<number | null>(null);
   const submittedAt = useRef<number | null>(null);
-  const [isStartingDelivery, setIsStartingDelivery] = useState(false);
   const [isSendingRequest, setIsSendingRequest] = useState(false);
   const [otp, setOtp] = useState("");
   const [otpError, setOtpError] = useState("");
@@ -606,19 +486,51 @@ export function DeliveryFlow() {
   const [isSubmittingIncident, setIsSubmittingIncident] = useState(false);
   const [incidentReference, setIncidentReference] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const galleryInput = useRef<HTMLInputElement>(null);
+  const deliverySessionRef = useRef<DeliverySession | null>(null);
+  const sessionPromise = useRef<Promise<DeliverySession> | null>(null);
+  const phoneTouched = useRef(false);
+  const scanRun = useRef(0);
+  const lookupRun = useRef(0);
+  // Set only when the OCR quota is used up and the photo was stored through the plain image upload instead.
+  const fallbackImageUrl = useRef<string | null>(null);
+
+  const storeSession = useCallback((session: DeliverySession | null) => {
+    deliverySessionRef.current = session;
+    setDeliverySession(session);
+  }, []);
+
+  const clearDraft = useCallback(() => {
+    window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+  }, []);
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
     const scannedLockerCode = searchParams.get("locker")?.trim() ?? "";
     const preview = PREVIEW_ENABLED ? (searchParams.get("preview") as Screen | null) : null;
     const previewPhone = PREVIEW_ENABLED ? searchParams.get("phone") : null;
-    const available: Screen[] = ["welcome", "home", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "receive-success", "recipient", "parcel", "confirm", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout", "invalid-locker", "locker-unavailable"];
+    const available: Screen[] = ["welcome", "receive-otp", "receive-details", "receive-open-failed", "receive-opened", "receive-success", "recipient", "parcel", "waiting", "searching", "compartment", "closing", "success", "not-found", "rejected", "expired", "full", "door-timeout", "invalid-locker", "locker-unavailable"];
     const timer = window.setTimeout(() => {
       if (!LOCKER_CODE_PATTERN.test(scannedLockerCode)) {
         setScreen("invalid-locker");
         return;
       }
       setLockerCode(scannedLockerCode);
+      // Resume an unfinished drop-off after a reload or app switch; the photo itself cannot be restored.
+      try {
+        const draft = JSON.parse(window.sessionStorage.getItem(DRAFT_STORAGE_KEY) ?? "null") as
+          | { lockerCode: string; session: DeliverySession; phone: string }
+          | null;
+        if (draft && draft.lockerCode === scannedLockerCode && new Date(draft.session.sessionExpiresAt).getTime() > Date.now()) {
+          storeSession(draft.session);
+          if (draft.phone) {
+            phoneTouched.current = true;
+            setPhone(draft.phone);
+          }
+        }
+      } catch {
+        window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      }
       if (previewPhone) setPhone(formatPhone(previewPhone));
       if (preview === "waiting") {
         setApprovalDeadline(Date.now() + PREVIEW_APPROVAL_SECONDS * 1000);
@@ -635,7 +547,7 @@ export function DeliveryFlow() {
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [storeSession]);
 
   useEffect(() => {
     if (screen !== "closing" || !doorDeadline) return;
@@ -742,6 +654,48 @@ export function DeliveryFlow() {
   }, [approvalDeadline, screen]);
 
   useEffect(() => {
+    if (!deliverySession || !["parcel", "recipient"].includes(screen)) return;
+    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone }));
+  }, [deliverySession, lockerCode, phone, screen]);
+
+  // Looks the recipient up once a full number is present, so the Shipper can compare the name with the waybill.
+  useEffect(() => {
+    if (screen !== "recipient") return;
+    const digits = phoneDigits(phone);
+    const run = ++lookupRun.current;
+    const timer = window.setTimeout(async () => {
+      if (!PHONE_PATTERN.test(digits)) {
+        setRecipientStatus("idle");
+        setRecipientName("");
+        setRecipientMessage("");
+        return;
+      }
+      const session = deliverySessionRef.current;
+      if (!session || (scanStatus !== "ready" && !fallbackImageUrl.current)) return;
+      setRecipientStatus("loading");
+      setRecipientName("");
+      try {
+        const result = await resolveRecipient(session.id, session.guestSessionToken, digits);
+        if (run !== lookupRun.current) return;
+        setRecipientName(result.fullName);
+        setRecipientStatus("found");
+      } catch (error) {
+        if (run !== lookupRun.current) return;
+        setRecipientName("");
+        if (error instanceof DeliveryApiError && error.code === "delivery/recipient_not_found") {
+          setRecipientStatus("not-found");
+        } else if (error instanceof DeliveryApiError && error.code === "delivery/lookup_limit_reached") {
+          setRecipientStatus("limit");
+        } else {
+          setRecipientStatus("error");
+          setRecipientMessage(error instanceof Error ? error.message : "Không thể tra cứu người nhận.");
+        }
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [phone, scanStatus, screen, lookupTick]);
+
+  useEffect(() => {
     if (!imageUrl?.startsWith("blob:")) return;
     return () => URL.revokeObjectURL(imageUrl);
   }, [imageUrl]);
@@ -791,17 +745,27 @@ export function DeliveryFlow() {
   const reset = () => {
     setScreen("welcome");
     setPhone("");
-    setPhoneConfirmed(false);
-    setPhoneError("");
+    phoneTouched.current = false;
+    scanRun.current += 1;
+    lookupRun.current += 1;
+    fallbackImageUrl.current = null;
+    sessionPromise.current = null;
+    clearDraft();
+    setRecipientName("");
+    setRecipientStatus("idle");
+    setRecipientMessage("");
+    setScanStatus("idle");
+    setOcrNotice("");
+    setOcrPhones([]);
+    setIsPhotoZoomed(false);
     setApiError("");
-    setDeliverySession(null);
+    storeSession(null);
     setCompartmentCode("");
     setParcelId("");
     setApprovalDeadline(null);
     setApprovalSeconds(null);
     setApprovalTotalSeconds(null);
     submittedAt.current = null;
-    setIsStartingDelivery(false);
     setIsSendingRequest(false);
     setOtp("");
     setOtpError("");
@@ -898,75 +862,126 @@ export function DeliveryFlow() {
     } finally { setOpeningDoor(false); }
   };
 
-  const confirmRecipientPhone = () => {
-    const normalized = phoneDigits(phone);
-    if (!/^0\d{9}$/.test(normalized)) {
-      setPhoneError("Nhập số điện thoại Việt Nam gồm 10 chữ số.");
-      setPhoneConfirmed(false);
-      return;
+  const handleSessionError = (error: unknown) => {
+    if (error instanceof DeliveryApiError && error.code === "locker/not_found") {
+      setScreen("invalid-locker");
+    } else if (error instanceof DeliveryApiError && error.code === "locker/not_operational") {
+      setScreen("locker-unavailable");
+    } else {
+      setApiError(error instanceof Error ? error.message : "Không thể khởi tạo phiên gửi hàng.");
     }
+  };
 
-    setPhone(formatPhone(normalized));
-    setPhoneError("");
-    setPhoneConfirmed(true);
+  // The session is created in the background so the camera can open straight from the tap.
+  const ensureSession = (): Promise<DeliverySession> => {
+    if (deliverySessionRef.current) return Promise.resolve(deliverySessionRef.current);
+    if (!sessionPromise.current) {
+      sessionPromise.current = initiateDelivery(lockerCode)
+        .then((session) => {
+          storeSession(session);
+          return session;
+        })
+        .finally(() => {
+          sessionPromise.current = null;
+        });
+    }
+    return sessionPromise.current;
+  };
+
+  const beginSend = () => {
+    setApiError("");
+    setScreen("parcel");
+    fileInput.current?.click();
+    ensureSession().catch(handleSessionError);
+  };
+
+  const runScan = async (file: File) => {
+    const run = ++scanRun.current;
+    fallbackImageUrl.current = null;
+    setScanStatus("scanning");
+    setOcrNotice("");
+    setOcrPhones([]);
+    setApiError("");
+
+    try {
+      let result: Awaited<ReturnType<typeof scanWaybill>> | undefined;
+      for (let attempt = 0; !result; attempt += 1) {
+        const session = await ensureSession();
+        try {
+          result = await scanWaybill(session.id, session.guestSessionToken, file);
+        } catch (error) {
+          // A session restored after a reload may already be gone, so start a fresh one once.
+          const stale = error instanceof DeliveryApiError && [401, 404, 410].includes(error.status);
+          if (!stale || attempt > 0) throw error;
+          storeSession(null);
+        }
+      }
+      if (run !== scanRun.current) return;
+
+      setScanStatus("ready");
+      if (result.isMasked) {
+        setOcrNotice("masked");
+      } else if (result.status === "Succeeded" && result.phones.length > 0) {
+        setOcrNotice("success");
+        setOcrPhones(result.phones);
+        if (!phoneTouched.current) setPhone(formatPhone(result.phones[0]));
+      } else {
+        setOcrNotice("failed");
+      }
+    } catch (error) {
+      if (run !== scanRun.current) return;
+      if (error instanceof DeliveryApiError && error.code === "delivery/ocr_limit_reached") {
+        // Automatic reading is used up for this session: keep the photo through the plain upload and let the Shipper type.
+        try {
+          fallbackImageUrl.current = await uploadParcelFile(file);
+          if (run !== scanRun.current) return;
+          setScanStatus("ready");
+          setOcrNotice("failed");
+        } catch (uploadError) {
+          if (run !== scanRun.current) return;
+          setScanStatus("error");
+          setApiError(uploadError instanceof Error ? uploadError.message : "Không thể tải ảnh kiện hàng lên.");
+        }
+        return;
+      }
+      setScanStatus("error");
+      setApiError(error instanceof Error ? error.message : "Không thể tải ảnh kiện hàng lên.");
+    }
   };
 
   const choosePhoto = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) return;
     try {
-      const squareImage = await cropImageToSquare(file);
-      setImageFile(squareImage);
-      setImageUrl(URL.createObjectURL(squareImage));
+      const prepared = await prepareParcelImage(file);
+      setImageFile(prepared);
+      setImageUrl(URL.createObjectURL(prepared));
       setApiError("");
+      setScreen("recipient");
+      void runScan(prepared);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Không thể xử lý ảnh kiện hàng.");
-    } finally {
-      event.target.value = "";
     }
   };
 
-  const startDelivery = async () => {
-    if (deliverySession) {
-      setScreen("recipient");
-      return;
-    }
-
-    setApiError("");
-    setIsStartingDelivery(true);
-    try {
-      const session = await initiateDelivery(lockerCode);
-      setDeliverySession(session);
-      setScreen("recipient");
-    } catch (error) {
-      if (error instanceof DeliveryApiError && error.code === "locker/not_found") {
-        setScreen("invalid-locker");
-      } else if (error instanceof DeliveryApiError && error.code === "locker/not_operational") {
-        setScreen("locker-unavailable");
-      } else {
-        setApiError(error instanceof Error ? error.message : "Không thể khởi tạo phiên gửi hàng.");
-      }
-    } finally {
-      setIsStartingDelivery(false);
-    }
+  const changePhone = (value: string) => {
+    phoneTouched.current = true;
+    setPhone(normalizePhoneInput(value));
   };
 
   const sendDeliveryRequest = async () => {
-    if (!deliverySession || !imageFile) {
-      setApiError("Phiên gửi hàng hoặc ảnh kiện hàng chưa sẵn sàng.");
+    const session = deliverySessionRef.current;
+    if (!session || recipientStatus !== "found") {
+      setApiError("Chưa xác nhận được người nhận. Vui lòng kiểm tra lại số điện thoại.");
       return;
     }
 
     setApiError("");
     setIsSendingRequest(true);
     try {
-      const parcelImageUrl = await uploadParcelFile(imageFile);
-      await submitDelivery(
-        deliverySession.id,
-        deliverySession.guestSessionToken,
-        parcelImageUrl,
-        phoneDigits(phone),
-      );
+      await submitDelivery(session.id, session.guestSessionToken, fallbackImageUrl.current, phoneDigits(phone));
+      clearDraft();
       // The approval window comes from the active system policy; the countdown starts once
       // the backend reports approvalExpiresAt on the first status poll.
       submittedAt.current = Date.now();
@@ -1005,29 +1020,27 @@ export function DeliveryFlow() {
 
   const goBack = () => {
     const previous: Partial<Record<Screen, Screen>> = {
-      home: "welcome",
       "receive-otp": "welcome",
       "receive-details": "receive-otp",
       "receive-open-failed": "receive-details",
       "receive-success": "welcome",
-      recipient: "home",
+      parcel: "welcome",
+      recipient: "parcel",
       "not-found": "recipient",
-      parcel: "recipient",
-      confirm: "parcel",
-      waiting: "confirm",
-      searching: "confirm",
+      waiting: "recipient",
+      searching: "recipient",
       compartment: "searching",
       closing: "compartment",
-      rejected: "home",
-      expired: "home",
-      full: "home",
-      "door-timeout": "home",
+      rejected: "welcome",
+      expired: "welcome",
+      full: "welcome",
+      "door-timeout": "welcome",
       "locker-unavailable": "welcome",
-      success: "home",
+      success: "welcome",
       incident: incidentOrigin,
       "incident-success": "welcome",
     };
-    setScreen(previous[screen] ?? "home");
+    setScreen(previous[screen] ?? "welcome");
   };
 
   const reportIncidentLink = (
@@ -1040,41 +1053,6 @@ export function DeliveryFlow() {
     switch (screen) {
       case "welcome":
         return null;
-
-      case "home":
-        return (
-          <div className="flex flex-1 flex-col">
-            <div className="mb-5">
-              <h1 className="text-[1.75rem] font-bold tracking-[-0.045em] text-[#172033]">Gửi hàng tại locker</h1>
-              <p className="mt-1 text-sm text-muted">Xác nhận thông tin điểm gửi và tiếp tục.</p>
-            </div>
-            <SendCarousel />
-            <div className="mt-4"><LockerCard lockerCode={lockerCode} /></div>
-            <div className="mt-4">
-              <Button
-                fullWidth
-                isPending={isStartingDelivery}
-                className="h-14 justify-between rounded-2xl bg-[#ff5b16] px-5 text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
-                size="lg"
-                onPress={startDelivery}
-              >
-                {({ isPending }) => (
-                  <>
-                    <span className="size-5" />
-                    <span className="flex items-center gap-2">
-                      {isPending ? <Spinner color="current" size="sm" /> : null}
-                      {isPending ? "Đang kết nối..." : "Tiếp tục gửi hàng"}
-                    </span>
-                    <ArrowChevronRight className={`size-5 ${isPending ? "invisible" : ""}`} />
-                  </>
-                )}
-              </Button>
-              {apiError ? <div className="mt-3"><ApiErrorCard message={apiError} /></div> : null}
-              <p className="mt-3 text-center text-xs text-muted">Không cần tài khoản · Muốn dùng tủ khác, hãy quét mã QR trên tủ đó</p>
-              <div className="mt-2">{reportIncidentLink}</div>
-            </div>
-          </div>
-        );
 
       case "receive-otp":
         return (
@@ -1326,208 +1304,172 @@ export function DeliveryFlow() {
           </div>
         );
 
-      case "recipient":
-        return (
-          <div className="relative flex flex-1 flex-col">
-            <div className="relative mx-auto aspect-[3/2] w-full max-w-md overflow-hidden rounded-[2rem] bg-[#fff7ef]">
-              <Image
-                alt="Nhân viên giao hàng nhập thông tin người nhận"
-                className="object-cover"
-                fill
-                priority
-                sizes="(max-width: 640px) calc(100vw - 40px), 456px"
-                src="/illustrations/recipient-phone-entry.png"
-              />
-            </div>
-
-            <div className="mt-4 text-center">
-              <h1 className="text-[1.8rem] font-bold tracking-[-0.05em] text-[#172033]">
-                {phoneConfirmed ? "Kiểm tra số điện thoại" : "Nhập người nhận"}
-              </h1>
-              <p className="mt-1 text-sm text-muted">
-                {phoneConfirmed ? "Backend sẽ xác thực người nhận khi bạn gửi yêu cầu." : "Nhập số điện thoại người nhận để tiếp tục."}
-              </p>
-            </div>
-
-            {!phoneConfirmed ? (
-              <Form className="mt-5 flex flex-col gap-4" onSubmit={(event) => { event.preventDefault(); confirmRecipientPhone(); }}>
-                <Card className="rounded-[1.6rem] border border-[#f4ebe5] bg-white shadow-[0_14px_38px_rgba(101,45,12,.07)]">
-                  <Card.Content>
-                    <TextField
-                      className="w-full"
-                      isInvalid={Boolean(phoneError)}
-                      type="tel"
-                      value={phone}
-                      variant="secondary"
-                      onChange={(value) => {
-                        const digits = phoneDigits(value);
-                        setPhone(formatPhone(digits));
-                        setPhoneError(
-                          digits.length > 10
-                            ? "Số điện thoại không được quá 10 chữ số."
-                            : digits.length === 10 && !digits.startsWith("0")
-                              ? "Số điện thoại phải bắt đầu bằng số 0."
-                              : "",
-                        );
-                      }}
-                    >
-                      <div className="mb-3 flex items-center gap-3">
-                        <span className="flex size-9 items-center justify-center rounded-xl bg-[#fff0e5] text-[#f55a12]">
-                          <Handset className="size-5" />
-                        </span>
-                        <Label className="font-semibold text-[#303747]">Số điện thoại người nhận</Label>
-                      </div>
-                      <Input className="h-12 rounded-xl" inputMode="numeric" maxLength={14} placeholder="0901 234 567" />
-                      <FieldError>{phoneError}</FieldError>
-                    </TextField>
-                  </Card.Content>
-                </Card>
-                <Button
-                  fullWidth
-                  isDisabled={phoneDigits(phone).length !== 10 || Boolean(phoneError)}
-                  className="h-14 justify-between rounded-2xl bg-[#ff5b16] px-5 text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
-                  size="lg"
-                  type="submit"
-                >
-                  <span className="size-5" />
-                  Xác nhận số điện thoại
-                  <ArrowChevronRight className="size-5" />
-                </Button>
-              </Form>
-            ) : (
-              <div className="mt-5 space-y-3">
-                <RecipientCard phone={phone} />
-                <Button
-                  fullWidth
-                  className="h-14 justify-between rounded-2xl bg-[#ff5b16] px-5 text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
-                  size="lg"
-                  onPress={() => setScreen("parcel")}
-                >
-                  <span className="size-5" />
-                  Tiếp tục chụp kiện hàng
-                  <ArrowChevronRight className="size-5" />
-                </Button>
-                <Button fullWidth size="sm" variant="ghost" onPress={() => setPhoneConfirmed(false)}>
-                  <span className="font-semibold text-[#f55a12]">Nhập số điện thoại khác</span>
-                </Button>
-              </div>
-            )}
-          </div>
-        );
-
       case "parcel":
         return (
           <div className="flex flex-1 flex-col">
             <div className="mb-5">
               <h1 className="text-[1.75rem] font-bold tracking-[-0.045em] text-[#172033]">Chụp ảnh kiện hàng</h1>
-              <p className="mt-1 text-sm leading-6 text-muted">Giữ kiện hàng đủ sáng và nằm trọn trong khung hình.</p>
+              <p className="mt-1 text-sm leading-6 text-muted">Chụp mặt có dán vận đơn. Hệ thống tự đọc số điện thoại người nhận giúp bạn.</p>
             </div>
-            {imageUrl ? (
-              <ParcelPreview imageUrl={imageUrl} />
-            ) : (
-              <ParcelPhotoGuide />
-            )}
-            <input ref={fileInput} hidden accept="image/*" capture="environment" type="file" onChange={choosePhoto} />
-            {!imageUrl ? (
-              <div className="mt-4">
-                <div className="mb-4 grid grid-cols-3 gap-2">
-                  {["Đủ sáng", "Không bị che", "Rõ toàn bộ"].map((tip) => (
-                    <div className="flex items-center justify-center gap-1.5 rounded-xl bg-[#fff4eb] px-2 py-2 text-[11px] font-semibold text-[#8b3c0d]" key={tip}>
-                      <Check className="size-3.5 text-[#f55a12]" /> {tip}
-                    </div>
-                  ))}
+            <ParcelPhotoGuide />
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              {["Đủ sáng", "Rõ vận đơn", "Không bị che"].map((tip) => (
+                <div className="flex items-center justify-center gap-1.5 rounded-xl bg-[#fff4eb] px-2 py-2 text-[11px] font-semibold text-[#8b3c0d]" key={tip}>
+                  <Check className="size-3.5 text-[#f55a12]" /> {tip}
                 </div>
-                <Button
-                  fullWidth
-                  className="h-14 rounded-2xl bg-[#ff5b16] text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
-                  size="lg"
-                  onPress={() => fileInput.current?.click()}
-                >
-                  <Camera className="size-5" /> Chụp ảnh kiện hàng
-                </Button>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-3">
-                <Button fullWidth className="h-12 rounded-2xl" size="lg" variant="outline" onPress={() => fileInput.current?.click()}>
-                  <FileArrowUp className="size-5" /> Chụp hoặc chọn lại
-                </Button>
-                <Button
-                  fullWidth
-                  className="h-14 rounded-2xl bg-[#ff5b16] text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
-                  size="lg"
-                  onPress={() => setScreen("confirm")}
-                >
-                  <Check className="size-5" /> Tiếp tục
-                </Button>
-              </div>
-            )}
+              ))}
+            </div>
+            {apiError ? <div className="mt-4"><ApiErrorCard message={apiError} /></div> : null}
+            <div className="mt-auto space-y-3 pt-5">
+              <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => fileInput.current?.click()}>
+                <Camera className="size-5" /> Chụp ảnh kiện hàng
+              </Button>
+              <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => galleryInput.current?.click()}>
+                <FileArrowUp className="size-5" /> Chọn ảnh từ thư viện
+              </Button>
+            </div>
           </div>
         );
 
-      case "confirm":
+      case "recipient": {
+        const digits = phoneDigits(phone);
+        const canSend = recipientStatus === "found" && scanStatus === "ready" && !isSendingRequest;
         return (
           <div className="flex flex-1 flex-col">
-            <div className="mb-5">
-              <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#f55a12]">Bước cuối</p>
-              <h1 className="mt-1 text-[1.9rem] font-extrabold tracking-[-0.05em] text-[#172033]">Kiểm tra kiện hàng</h1>
-              <p className="mt-1 text-sm leading-6 text-muted">Đối chiếu ảnh, số điện thoại và mã tủ trước khi gửi cho cư dân.</p>
+            <div className="mb-4">
+              <h1 className="text-[1.75rem] font-bold tracking-[-0.045em] text-[#172033]">Xác nhận người nhận</h1>
+              <p className="mt-1 text-sm leading-6 text-muted">Đối chiếu tên hiển thị với vận đơn trên kiện hàng rồi gửi yêu cầu.</p>
             </div>
 
-            <Card className="gap-0 overflow-hidden rounded-[1.7rem] border border-[#f2e7df] bg-white p-0 shadow-[0_18px_46px_rgba(91,40,10,.1)]">
-              <Card.Content className="p-0">
-                <div className="flex items-center gap-4 bg-[#fff7f1] p-4">
-                  <div className="relative size-24 shrink-0 overflow-hidden rounded-2xl bg-[#fff2e8] ring-1 ring-[#f4dfd0]">
-                    {imageUrl?.startsWith("blob:") ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img alt="Kiện hàng cần xác nhận" className="size-full object-cover" src={imageUrl} />
-                    ) : (
-                      <Image alt="Kiện hàng cần xác nhận" className="object-cover" fill sizes="96px" src={imageUrl ?? "/illustrations/parcel-photo-guide.png"} />
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
+            <Card className="gap-0 rounded-[1.6rem] border border-[#f2e7df] bg-white p-0 shadow-[0_14px_38px_rgba(101,45,12,.08)]">
+              <Card.Content className="flex-row items-center gap-4 p-3">
+                <button
+                  aria-label="Phóng to ảnh kiện hàng"
+                  className="relative size-24 shrink-0 overflow-hidden rounded-2xl bg-[#fff2e8] ring-1 ring-[#f4dfd0]"
+                  type="button"
+                  onClick={() => setIsPhotoZoomed(true)}
+                >
+                  {imageUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img alt="Ảnh kiện hàng" className="size-full object-cover" src={imageUrl} />
+                  ) : null}
+                </button>
+                <div className="min-w-0 flex-1">
+                  {scanStatus === "scanning" ? (
+                    <p className="flex items-center gap-2 text-sm font-semibold text-[#303747]"><Spinner color="current" size="sm" /> Đang đọc vận đơn...</p>
+                  ) : scanStatus === "ready" ? (
                     <Chip color="success" size="sm" variant="soft"><Check className="size-3" /> Ảnh đã sẵn sàng</Chip>
-                    <p className="mt-2 text-sm font-bold text-[#172033]">Ảnh kiện hàng sẽ được gửi kèm yêu cầu</p>
-                    <Button className="mt-1 h-8 px-0 text-[#f55a12]" size="sm" variant="ghost" onPress={() => setScreen("parcel")}>Chụp lại ảnh</Button>
-                  </div>
-                </div>
-                <div className="px-4">
-                  <div className="flex items-center gap-3 py-4">
-                   <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
-                      <Handset className="size-5" />
-                   </span>
-                   <div className="min-w-0 flex-1">
-                      <p className="text-xs text-muted">Số điện thoại người nhận</p>
-                      <p className="font-bold text-[#172033]">{formatPhone(phone)}</p>
-                   </div>
-                    <Button className="h-9 px-3 text-[#f55a12]" size="sm" variant="ghost" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Sửa</Button>
-                 </div>
-                 <div className="h-px bg-[#eee7e1]" />
-                  <div className="flex items-center gap-3 py-4">
-                    <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-[#fff0e7] text-[#f55a12]">
-                      <Box className="size-5" />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-muted">Điểm gửi</p>
-                      <p className="font-bold text-[#172033]">Locker {lockerCode}</p>
-                    </div>
-                  </div>
+                  ) : scanStatus === "error" ? (
+                    <Chip color="danger" size="sm" variant="soft">Chưa tải được ảnh</Chip>
+                  ) : null}
+                  <p className="mt-1 text-xs text-muted">Chạm vào ảnh để phóng to</p>
+                  <Button className="mt-1 h-8 px-0 text-[#f55a12]" size="sm" variant="ghost" onPress={() => fileInput.current?.click()}>
+                    <Camera className="size-4" /> Chụp lại ảnh
+                  </Button>
                 </div>
               </Card.Content>
             </Card>
-            {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
+
+            {scanStatus === "error" && imageFile ? (
+              <div className="mt-3 space-y-3">
+                {apiError ? <ApiErrorCard message={apiError} /> : null}
+                <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => void runScan(imageFile)}>
+                  Thử tải lại ảnh
+                </Button>
+              </div>
+            ) : null}
+
+            <Card className="mt-4 rounded-[1.6rem] border border-[#f4ebe5] bg-white shadow-[0_14px_38px_rgba(101,45,12,.07)]">
+              <Card.Content>
+                <TextField className="w-full" type="tel" value={phone} variant="secondary" onChange={changePhone}>
+                  <div className="mb-3 flex items-center gap-3">
+                    <span className="flex size-9 items-center justify-center rounded-xl bg-[#fff0e5] text-[#f55a12]">
+                      <Handset className="size-5" />
+                    </span>
+                    <Label className="font-semibold text-[#303747]">Số điện thoại người nhận</Label>
+                  </div>
+                  <Input
+                    autoComplete="off"
+                    className="h-14 rounded-xl text-lg font-semibold tracking-wide"
+                    enterKeyHint="done"
+                    inputMode="numeric"
+                    maxLength={14}
+                    placeholder="0901 234 567"
+                  />
+                </TextField>
+
+                {ocrPhones.length > 1 ? (
+                  <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Các số đọc được từ vận đơn">
+                    {ocrPhones.map((candidate) => (
+                      <Button
+                        className={`h-9 rounded-full px-3 text-sm font-semibold ${phoneDigits(phone) === candidate ? "bg-[#ff5b16] text-white" : "border border-[#f1ded1] bg-white text-[#172033]"}`}
+                        key={candidate}
+                        size="sm"
+                        variant="outline"
+                        onPress={() => changePhone(candidate)}
+                      >
+                        {formatPhone(candidate)}
+                      </Button>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div aria-live="polite" className="mt-3 text-sm">
+                  {scanStatus === "scanning" && digits.length === 0 ? (
+                    <p className="text-muted">Đang đọc số điện thoại từ vận đơn, bạn có thể nhập tay ngay.</p>
+                  ) : ocrNotice && recipientStatus === "idle" ? (
+                    <p className={ocrNotice === "success" ? "text-[#20a555]" : "text-[#b45309]"}>{OCR_NOTICES[ocrNotice]}</p>
+                  ) : null}
+                  {recipientStatus === "idle" && digits.length > 0 && digits.length < 10 ? (
+                    <p className="text-muted">Nhập đủ 10 số để hiện tên người nhận.</p>
+                  ) : null}
+                  {recipientStatus === "loading" ? (
+                    <p className="flex items-center gap-2 text-muted"><Spinner color="current" size="sm" /> Đang tìm người nhận...</p>
+                  ) : null}
+                  {recipientStatus === "not-found" ? (
+                    <p className="font-medium text-[#e5484d]">Số này chưa đăng ký nhận hàng tại tủ này. Kiểm tra lại số trên vận đơn.</p>
+                  ) : null}
+                  {recipientStatus === "limit" ? (
+                    <p className="font-medium text-[#e5484d]">Đã hết số lần tra cứu của phiên này. Vui lòng báo sự cố hoặc bắt đầu phiên gửi mới.</p>
+                  ) : null}
+                  {recipientStatus === "error" ? (
+                    <p className="flex flex-wrap items-center gap-2 font-medium text-[#e5484d]">
+                      {recipientMessage}
+                      <Button className="h-8 px-2" size="sm" variant="ghost" onPress={() => setLookupTick((tick) => tick + 1)}>Thử lại</Button>
+                    </p>
+                  ) : null}
+                </div>
+
+                {recipientStatus === "found" ? (
+                  <div className="mt-3 flex items-center gap-3 rounded-2xl bg-[#eaf9ef] p-4 ring-1 ring-[#c9efd6]">
+                    <CircleCheckFill className="size-7 shrink-0 text-[#20a555]" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-[#2f7d4f]">Người nhận (đối chiếu với vận đơn)</p>
+                      <p className="text-xl font-extrabold tracking-[-0.02em] text-[#172033] [overflow-wrap:anywhere]">{recipientName}</p>
+                    </div>
+                  </div>
+                ) : null}
+              </Card.Content>
+            </Card>
+
+            {scanStatus !== "error" && apiError ? <div className="mt-4"><ApiErrorCard message={apiError} /></div> : null}
+
             <div className="mt-auto pt-5">
               <Button
                 fullWidth
+                isDisabled={!canSend}
                 isPending={isSendingRequest}
-                className="h-14 rounded-2xl bg-[#ff5b16] text-base font-semibold text-white shadow-[0_12px_28px_rgba(255,91,22,.24)]"
+                className={PRIMARY_BUTTON_CLASS}
                 size="lg"
                 onPress={sendDeliveryRequest}
               >
                 {isSendingRequest ? <><Spinner color="current" size="sm" /> Đang gửi yêu cầu...</> : "Gửi yêu cầu cho cư dân"}
               </Button>
+              {scanStatus === "scanning" ? <p className="mt-2 text-center text-xs text-muted">Đang tải ảnh lên, nút gửi sẽ sáng khi xong.</p> : null}
             </div>
           </div>
         );
+      }
 
       case "waiting":
         return (
@@ -1680,7 +1622,7 @@ export function DeliveryFlow() {
             actions={
               <>
                 <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Hoàn tất</Button>
-                <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => { reset(); setScreen("home"); }}>Gửi kiện khác</Button>
+                <Button fullWidth className={SECONDARY_BUTTON_CLASS} size="lg" variant="outline" onPress={() => { reset(); beginSend(); }}>Gửi kiện khác</Button>
               </>
             }
           />
@@ -1693,7 +1635,7 @@ export function DeliveryFlow() {
             icon={<Xmark className="size-10" />}
             title="Không tìm thấy người nhận"
             description="Số điện thoại chưa thuộc cư dân đã đăng ký tại tủ này. Kiểm tra lại trước khi tiếp tục."
-            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => { setPhoneConfirmed(false); setScreen("recipient"); }}>Kiểm tra lại số điện thoại</Button>}
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => setScreen("recipient")}>Kiểm tra lại số điện thoại</Button>}
           />
         );
 
@@ -1839,13 +1781,23 @@ export function DeliveryFlow() {
     }
   })();
 
+  const photoInputs = (
+    <>
+      <input ref={fileInput} hidden accept="image/*" capture="environment" type="file" onChange={choosePhoto} />
+      <input ref={galleryInput} hidden accept="image/*" type="file" onChange={choosePhoto} />
+    </>
+  );
+
   if (screen === "welcome") {
     return (
-      <WelcomeScreen
-        onReceive={() => setScreen("receive-otp")}
-        onReport={openIncidentReport}
-        onSend={() => setScreen("home")}
-      />
+      <>
+        <WelcomeScreen
+          onReceive={() => setScreen("receive-otp")}
+          onReport={openIncidentReport}
+          onSend={beginSend}
+        />
+        {photoInputs}
+      </>
     );
   }
 
@@ -1857,6 +1809,22 @@ export function DeliveryFlow() {
           {content}
         </main>
       </div>
+      {photoInputs}
+      {isPhotoZoomed && imageUrl ? (
+        <div
+          aria-label="Ảnh kiện hàng phóng to"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-3"
+          role="dialog"
+          onClick={() => setIsPhotoZoomed(false)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img alt="Ảnh kiện hàng phóng to" className="max-h-full max-w-full object-contain" src={imageUrl} />
+          <Button isIconOnly aria-label="Đóng ảnh" className="absolute right-3 top-3 size-11 bg-white/90 text-[#172033]" onPress={() => setIsPhotoZoomed(false)}>
+            <Xmark className="size-6" />
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
