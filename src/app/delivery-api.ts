@@ -45,6 +45,7 @@ export class DeliveryApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -58,6 +59,7 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
     throw new DeliveryApiError(
       payload?.message ?? payload?.detail ?? payload?.title ?? "Không thể kết nối với hệ thống. Vui lòng thử lại.",
       response.status,
+      typeof payload?.code === "string" ? payload.code : undefined,
     );
   }
 
