@@ -727,6 +727,7 @@ export function DeliveryFlow() {
         const current = await getReturnPickup(pickupSession);
         if (cancelled || generation !== pickupRun.current) return;
         if (current.completed === true) {
+          pickupRun.current++;
           setPickupCompartmentCode(current.compartmentCode);
           setPickupSession(null);
           setOtp("");
@@ -890,6 +891,7 @@ export function DeliveryFlow() {
       const current = await getReturnPickup(pickupSession);
       if (generation !== pickupRun.current) return;
       if (current.completed === true) {
+        pickupRun.current++;
         setPickupCompartmentCode(current.compartmentCode);
         setPickupSession(null);
         setOtp("");
