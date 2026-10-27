@@ -53,6 +53,7 @@ import {
   validateReturnPickup,
 } from "./delivery-api";
 import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
+import { LockerSupport } from "./locker-support";
 
 type Screen =
   | "welcome"
@@ -1796,6 +1797,7 @@ export function DeliveryFlow() {
           onReport={openIncidentReport}
           onSend={beginSend}
         />
+        {lockerCode ? <div className="mx-auto max-w-lg px-5 pb-6"><LockerSupport key={lockerCode} lockerCode={lockerCode} /></div> : null}
         {photoInputs}
       </>
     );
@@ -1807,6 +1809,7 @@ export function DeliveryFlow() {
         <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing", "invalid-locker"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
         <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : ["receive-details", "receive-open-failed", "receive-opened", "receive-success"].includes(screen) ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
           {content}
+          <LockerSupport key={lockerCode} lockerCode={lockerCode} reference={screen === "incident-success" ? incidentReference : screen.startsWith("receive-") ? pickupSession?.returnRequestId : deliverySession?.id} />
         </main>
       </div>
       {photoInputs}
