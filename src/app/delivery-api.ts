@@ -137,6 +137,12 @@ export const getDeliveryStatus = (requestId: string, guestSessionToken: string) 
     headers: { "X-Guest-Session-Token": guestSessionToken },
   });
 
+export const cancelDelivery = (requestId: string, guestSessionToken: string) =>
+  request<DeliverySummary>(`/backend/delivery-requests/${requestId}:cancel`, {
+    method: "POST",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+  });
+
 export const reserveCompartment = (requestId: string, guestSessionToken: string) =>
   request<CompartmentReservation>(`/backend/delivery-requests/${requestId}:openCompartment`, {
     method: "POST",

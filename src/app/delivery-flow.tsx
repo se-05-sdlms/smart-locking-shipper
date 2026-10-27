@@ -40,6 +40,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import {
   DeliveryApiError,
+  cancelDelivery,
   getDeliveryStatus,
   getReturnPickup,
   initiateDelivery,
@@ -69,6 +70,7 @@ type Screen =
   | "closing"
   | "success"
   | "not-found"
+  | "cancelled"
   | "rejected"
   | "expired"
   | "full"
@@ -459,6 +461,10 @@ export function DeliveryFlow() {
   const [ocrPhones, setOcrPhones] = useState<string[]>([]);
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [apiError, setApiError] = useState("");
+  const [canCancel, setCanCancel] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const cancelPending = useRef(false);
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
   const [compartmentCode, setCompartmentCode] = useState("");
   const [parcelId, setParcelId] = useState("");
@@ -519,10 +525,11 @@ export function DeliveryFlow() {
       // Resume an unfinished drop-off after a reload or app switch; the photo itself cannot be restored.
       try {
         const draft = JSON.parse(window.sessionStorage.getItem(DRAFT_STORAGE_KEY) ?? "null") as
-          | { lockerCode: string; session: DeliverySession; phone: string }
+          | { lockerCode: string; session: DeliverySession; phone: string; screen?: Screen }
           | null;
         if (draft && draft.lockerCode === scannedLockerCode && new Date(draft.session.sessionExpiresAt).getTime() > Date.now()) {
           storeSession(draft.session);
+          if (draft.screen && ["waiting", "compartment", "closing"].includes(draft.screen)) setScreen("waiting");
           if (draft.phone) {
             phoneTouched.current = true;
             setPhone(draft.phone);
@@ -574,8 +581,12 @@ export function DeliveryFlow() {
       inFlight = true;
       try {
         const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
-        if (cancelled) return;
-        setApiError("");
+        if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        setCanCancel(status.status === "PendingApproval");
+        if (cancelPending.current) {
+          timer = window.setTimeout(poll, 2000);
+          return;
+        }
         if (status.approvalExpiresAt) {
           const deadline = new Date(status.approvalExpiresAt).getTime();
           const startedAt = submittedAt.current ?? Date.now();
@@ -609,7 +620,13 @@ export function DeliveryFlow() {
           return;
         }
         if (status.status === "Rejected") return setScreen("rejected");
-        if (status.status === "Expired" || status.status === "Cancelled") return setScreen("expired");
+        if (status.status === "Cancelled") {
+          clearDraft();
+          storeSession(null);
+          setScreen("cancelled");
+          return;
+        }
+        if (status.status === "Expired") return setScreen("expired");
         if (status.status === "Failed") return setScreen(status.failureCode === "NoCompartment" ? "full" : "door-timeout");
         timer = window.setTimeout(poll, 2000);
       } catch (error) {
@@ -637,7 +654,7 @@ export function DeliveryFlow() {
       document.removeEventListener("visibilitychange", resumePolling);
       window.removeEventListener("online", resumePolling);
     };
-  }, [deliverySession, screen]);
+  }, [deliverySession, screen, clearDraft, storeSession]);
 
   useEffect(() => {
     if (screen !== "waiting" || !approvalDeadline) return;
@@ -645,7 +662,7 @@ export function DeliveryFlow() {
     const updateCountdown = () => {
       const remaining = secondsUntil(approvalDeadline);
       setApprovalSeconds(remaining);
-      if (remaining === 0) setScreen("expired");
+      // The server decides expiry; approval may have won as the countdown reached zero.
     };
 
     updateCountdown();
@@ -654,8 +671,8 @@ export function DeliveryFlow() {
   }, [approvalDeadline, screen]);
 
   useEffect(() => {
-    if (!deliverySession || !["parcel", "recipient"].includes(screen)) return;
-    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone }));
+    if (!deliverySession || !["parcel", "recipient", "waiting", "compartment", "closing"].includes(screen)) return;
+    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen }));
   }, [deliverySession, lockerCode, phone, screen]);
 
   // Looks the recipient up once a full number is present, so the Shipper can compare the name with the waybill.
@@ -746,6 +763,10 @@ export function DeliveryFlow() {
 
   const reset = () => {
     setScreen("welcome");
+    setCanCancel(false);
+    setConfirmingCancel(false);
+    setIsCancelling(false);
+    cancelPending.current = false;
     setPhone("");
     phoneTouched.current = false;
     scanRun.current += 1;
@@ -1002,6 +1023,32 @@ export function DeliveryFlow() {
       }
     } finally {
       setIsSendingRequest(false);
+    }
+  };
+
+  const cancelWaitingDelivery = async () => {
+    const session = deliverySessionRef.current;
+    if (!session || cancelPending.current) return;
+    cancelPending.current = true;
+    setIsCancelling(true);
+    setApiError("");
+    try {
+      const result = await cancelDelivery(session.id, session.guestSessionToken);
+      // Cancelled is enum value 7 in the existing summary contract.
+      if (result.status !== 7) throw new Error("Chưa xác nhận được kết quả hủy. Đang tải lại trạng thái.");
+      clearDraft();
+      storeSession(null);
+      setCanCancel(false);
+      setScreen("cancelled");
+    } catch (error) {
+      setApiError(error instanceof DeliveryApiError && error.status === 409
+        ? "Yêu cầu không còn chờ duyệt nên không thể hủy. Hệ thống đang tải lại kết quả; nếu không thể tiếp tục giao, hãy báo sự cố."
+        : error instanceof Error ? error.message : "Chưa xác nhận hủy thành công. Vui lòng kiểm tra lại trạng thái.");
+      if (error instanceof DeliveryApiError && error.status === 409) setCanCancel(false);
+    } finally {
+      cancelPending.current = false;
+      setIsCancelling(false);
+      setConfirmingCancel(false);
     }
   };
 
@@ -1516,8 +1563,23 @@ export function DeliveryFlow() {
               </Card.Content>
             </Card>
 
-            <div className="mt-auto pt-6">
-              <Button fullWidth className={SECONDARY_BUTTON_CLASS} variant="outline" onPress={reset}>Về trang đầu</Button>
+            {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
+            <div className="mt-auto space-y-3 pt-6">
+              {canCancel && !confirmingCancel ? (
+                <Button fullWidth variant="danger-soft" onPress={() => setConfirmingCancel(true)}>Hủy giao</Button>
+              ) : null}
+              {confirmingCancel ? (
+                <Card>
+                  <Card.Content className="gap-3">
+                    <p className="font-semibold">Xác nhận hủy yêu cầu giao?</p>
+                    <p className="text-sm text-muted">Chỉ hủy khi cư dân chưa phê duyệt. Kết quả cuối cùng do hệ thống xác nhận.</p>
+                    <Button fullWidth isPending={isCancelling} variant="danger" onPress={cancelWaitingDelivery}>Xác nhận hủy giao</Button>
+                    <Button fullWidth isDisabled={isCancelling} variant="secondary" onPress={() => setConfirmingCancel(false)}>Tiếp tục chờ</Button>
+                  </Card.Content>
+                </Card>
+              ) : null}
+              {!canCancel ? <p className="text-center text-sm text-muted">Chỉ yêu cầu đang chờ duyệt mới được hủy. Nếu đã được duyệt và không thể tiếp tục giao, hãy báo sự cố.</p> : null}
+              {reportIncidentLink}
             </div>
           </div>
         );
@@ -1568,9 +1630,13 @@ export function DeliveryFlow() {
               </>
             }
             actions={
+              <>
               <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => setScreen("closing")}>
                 <Check className="size-5" /> Đã đặt kiện hàng
               </Button>
+              <p className="text-center text-sm text-muted">Yêu cầu đã được duyệt nên không thể hủy. Hãy báo sự cố nếu không thể hoàn tất giao hàng.</p>
+              {reportIncidentLink}
+              </>
             }
           />
         );
@@ -1647,6 +1713,17 @@ export function DeliveryFlow() {
           />
         );
 
+      case "cancelled":
+        return (
+          <StatusScreen
+            tone="warning"
+            icon={<Xmark className="size-10" />}
+            title="Đã hủy yêu cầu giao"
+            description="Hệ thống đã xác nhận hủy trước khi cư dân phê duyệt. Cư dân đã được thông báo; yêu cầu này không thể tiếp tục mở ngăn."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
+        );
+
       case "rejected":
         return (
           <StatusScreen
@@ -1664,7 +1741,7 @@ export function DeliveryFlow() {
             tone="warning"
             icon={<Clock className="size-10" />}
             title="Yêu cầu đã hết hạn"
-            description="Người nhận chưa phản hồi trong thời gian quy định. Lượt gửi đã được hủy."
+            description="Yêu cầu đã hết thời gian xử lý theo hệ thống. Lượt gửi này không thể tiếp tục."
             actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
           />
         );
