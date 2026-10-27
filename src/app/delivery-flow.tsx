@@ -63,6 +63,7 @@ type Screen =
   | "receive-open-failed"
   | "receive-opened"
   | "receive-success"
+  | "receive-unavailable"
   | "recipient"
   | "parcel"
   | "waiting"
@@ -486,6 +487,17 @@ export function DeliveryFlow() {
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
   const [pickupCompartmentCode, setPickupCompartmentCode] = useState("");
+  const pickupRun = useRef(0);
+  const clearPickupAccess = useCallback(() => {
+    pickupRun.current++;
+    setPickupSession(null);
+    setPickupCompartmentCode("");
+    setOtp("");
+    setOtpError("");
+    setApiError("");
+    setIsPhotoZoomed(false);
+    setScreen("receive-unavailable");
+  }, []);
   const [incidentOrigin, setIncidentOrigin] = useState<Screen>("welcome");
   const [incidentType, setIncidentType] = useState<GuestIncidentType | "">("");
   const [incidentDescription, setIncidentDescription] = useState("");
@@ -721,27 +733,37 @@ export function DeliveryFlow() {
   }, [imageUrl]);
 
   useEffect(() => {
-    if (screen !== "receive-opened" || !pickupSession) return;
+    if (!["receive-details", "receive-open-failed", "receive-opened"].includes(screen) || !pickupSession) return;
     let cancelled = false;
+    let inFlight = false;
     let timer: number | undefined;
+    const generation = pickupRun.current;
 
     const poll = async () => {
-      if (cancelled || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (cancelled || inFlight || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (new Date(pickupSession.expiresAt).getTime() <= Date.now()) { clearPickupAccess(); return; }
+      inFlight = true;
       try {
-        await getReturnPickup(pickupSession);
+        const current = await getReturnPickup(pickupSession);
+        if (cancelled || generation !== pickupRun.current) return;
+        if (current.completed === true) {
+          setPickupCompartmentCode(current.compartmentCode);
+          setPickupSession(null);
+          setOtp("");
+          setScreen("receive-success");
+          return;
+        }
+        setApiError("");
         if (!cancelled) timer = window.setTimeout(poll, 2000);
       } catch (error) {
-        if (cancelled) return;
-        if (error instanceof DeliveryApiError && error.status === 409) {
-          setApiError("");
-          setPickupCompartmentCode(pickupSession.compartmentCode);
-          setPickupSession(null);
-          setScreen("receive-success");
+        if (cancelled || generation !== pickupRun.current) return;
+        if (error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)) {
+          clearPickupAccess();
           return;
         }
         setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái cửa tủ.");
         timer = window.setTimeout(poll, 3000);
-      }
+      } finally { inFlight = false; }
     };
 
     const resumePolling = () => {
@@ -760,9 +782,10 @@ export function DeliveryFlow() {
       document.removeEventListener("visibilitychange", resumePolling);
       window.removeEventListener("online", resumePolling);
     };
-  }, [pickupSession, screen]);
+  }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    pickupRun.current++;
     setScreen("welcome");
     setCanCancel(false);
     setConfirmingCancel(false);
@@ -861,13 +884,22 @@ export function DeliveryFlow() {
       return;
     }
     setIsVerifyingPickup(true);
+    const generation = ++pickupRun.current;
     try {
       const session = await validateReturnPickup(lockerCode, otp);
+      if (generation !== pickupRun.current) return;
+      setOtp("");
       setPickupSession(session);
       setPickupCompartmentCode(session.compartmentCode);
       setScreen("receive-details");
     } catch (error) {
-      setOtpError(error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
+      if (generation !== pickupRun.current) return;
+      setPickupSession(null);
+      setPickupCompartmentCode("");
+      setOtp("");
+      setOtpError(error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)
+        ? "Mã không còn hiệu lực hoặc chưa sẵn sàng. Liên hệ cư dân hoặc người vận hành tủ."
+        : error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
     } finally {
       setIsVerifyingPickup(false);
     }
@@ -877,10 +909,24 @@ export function DeliveryFlow() {
     if (!pickupSession) return;
     setApiError("");
     setOpeningDoor(true);
+    const generation = pickupRun.current;
     try {
-      setPickupSession(await openReturnPickup(pickupSession));
+      const current = await getReturnPickup(pickupSession);
+      if (generation !== pickupRun.current) return;
+      if (current.completed === true) {
+        setPickupCompartmentCode(current.compartmentCode);
+        setPickupSession(null);
+        setOtp("");
+        setScreen("receive-success");
+        return;
+      }
+      const opened = await openReturnPickup(current);
+      if (generation !== pickupRun.current) return;
+      setPickupSession(opened);
       setScreen("receive-opened");
     } catch (error) {
+      if (generation !== pickupRun.current) return;
+      if (error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)) { clearPickupAccess(); return; }
       setApiError(error instanceof Error ? error.message : "Không thể mở ngăn tủ.");
       setScreen("receive-open-failed");
     } finally { setOpeningDoor(false); }
@@ -1248,7 +1294,7 @@ export function DeliveryFlow() {
               <span className="mx-auto flex size-20 items-center justify-center rounded-full bg-[#eaf9ef] text-[#20a555] shadow-[0_12px_32px_rgba(32,165,85,.14)]">
                 <CircleCheckFill className="size-11" />
               </span>
-              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Ngăn {pickupSession?.compartmentCode} đã mở</h1>
+              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Đã gửi lệnh mở ngăn {pickupSession?.compartmentCode}</h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
                 Lấy kiện hàng ra khỏi ngăn và đóng cửa tủ sau khi hoàn tất.
               </p>
@@ -1296,6 +1342,17 @@ export function DeliveryFlow() {
           </div>
         );
 
+      case "receive-unavailable":
+        return (
+          <StatusScreen
+            tone="warning"
+            icon={<TriangleExclamation className="size-11" />}
+            title="Quyền nhận không còn khả dụng"
+            description="Mã hoặc phiên nhận đã hết hiệu lực, bị thu hồi hoặc trạng thái đã thay đổi. Chưa có xác nhận lấy hàng thành công. Vui lòng liên hệ cư dân hoặc người vận hành tủ; không tiếp tục mở ngăn bằng mã cũ."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
+        );
+
       case "receive-success":
         return (
           <StatusScreen
@@ -1319,7 +1376,7 @@ export function DeliveryFlow() {
                  Không thể mở ngăn {pickupSession?.compartmentCode}
               </h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
-                Tủ chưa phản hồi yêu cầu mở ngăn. Kiện hàng vẫn đang được khóa an toàn.
+                Chưa xác nhận được kết quả mở ngăn. Kiểm tra trạng thái trước khi thử lại; liên hệ người vận hành nếu cửa hoặc đồ có bất thường.
               </p>
             </div>
 

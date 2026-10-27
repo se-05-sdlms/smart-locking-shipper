@@ -33,6 +33,7 @@ export type CompartmentReservation = {
 };
 
 export type ReturnPickupSession = {
+  completed?: boolean;
   returnRequestId: string;
   guestSessionToken: string;
   lockerCode: string;
