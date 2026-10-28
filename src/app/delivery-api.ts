@@ -33,6 +33,7 @@ export type CompartmentReservation = {
 };
 
 export type ReturnPickupSession = {
+  completed?: boolean;
   returnRequestId: string;
   guestSessionToken: string;
   lockerCode: string;
@@ -134,6 +135,12 @@ export const submitDelivery = (
 export const getDeliveryStatus = (requestId: string, guestSessionToken: string) =>
   request<GuestDeliveryStatus>(`/backend/delivery-requests/${requestId}`, {
     method: "GET",
+    headers: { "X-Guest-Session-Token": guestSessionToken },
+  });
+
+export const cancelDelivery = (requestId: string, guestSessionToken: string) =>
+  request<DeliverySummary>(`/backend/delivery-requests/${requestId}:cancel`, {
+    method: "POST",
     headers: { "X-Guest-Session-Token": guestSessionToken },
   });
 

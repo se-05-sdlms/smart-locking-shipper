@@ -40,6 +40,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import {
   DeliveryApiError,
+  cancelDelivery,
   getDeliveryStatus,
   getReturnPickup,
   initiateDelivery,
@@ -53,6 +54,7 @@ import {
   validateReturnPickup,
 } from "./delivery-api";
 import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
+import { LockerSupport } from "./locker-support";
 
 type Screen =
   | "welcome"
@@ -61,6 +63,7 @@ type Screen =
   | "receive-open-failed"
   | "receive-opened"
   | "receive-success"
+  | "receive-unavailable"
   | "recipient"
   | "parcel"
   | "waiting"
@@ -69,6 +72,7 @@ type Screen =
   | "closing"
   | "success"
   | "not-found"
+  | "cancelled"
   | "rejected"
   | "expired"
   | "full"
@@ -95,7 +99,7 @@ const OCR_NOTICES = {
   failed: "Quét vận đơn thất bại. Vui lòng nhập số điện thoại người nhận thủ công.",
   masked: "Vận đơn đã che bớt số điện thoại. Vui lòng nhập đầy đủ số điện thoại người nhận.",
 } as const;
-type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "limit" | "error";
+type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "cannot-receive" | "limit" | "error";
 type ScanStatus = "idle" | "scanning" | "ready" | "error";
 
 const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
@@ -459,7 +463,14 @@ export function DeliveryFlow() {
   const [ocrPhones, setOcrPhones] = useState<string[]>([]);
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [apiError, setApiError] = useState("");
+  // Poll recovery must not clear a newer cancel/submit error.
+  const [waitingPollError, setWaitingPollError] = useState<{ sessionId: string; message: string } | null>(null);
+  const [canCancel, setCanCancel] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const cancelPending = useRef(false);
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
+  const waitingError = apiError || (waitingPollError && waitingPollError.sessionId === deliverySession?.id ? waitingPollError.message : "");
   const [compartmentCode, setCompartmentCode] = useState("");
   const [parcelId, setParcelId] = useState("");
   const [approvalDeadline, setApprovalDeadline] = useState<number | null>(null);
@@ -479,6 +490,17 @@ export function DeliveryFlow() {
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
   const [pickupCompartmentCode, setPickupCompartmentCode] = useState("");
+  const pickupRun = useRef(0);
+  const clearPickupAccess = useCallback(() => {
+    pickupRun.current++;
+    setPickupSession(null);
+    setPickupCompartmentCode("");
+    setOtp("");
+    setOtpError("");
+    setApiError("");
+    setIsPhotoZoomed(false);
+    setScreen("receive-unavailable");
+  }, []);
   const [incidentOrigin, setIncidentOrigin] = useState<Screen>("welcome");
   const [incidentType, setIncidentType] = useState<GuestIncidentType | "">("");
   const [incidentDescription, setIncidentDescription] = useState("");
@@ -519,10 +541,11 @@ export function DeliveryFlow() {
       // Resume an unfinished drop-off after a reload or app switch; the photo itself cannot be restored.
       try {
         const draft = JSON.parse(window.sessionStorage.getItem(DRAFT_STORAGE_KEY) ?? "null") as
-          | { lockerCode: string; session: DeliverySession; phone: string }
+          | { lockerCode: string; session: DeliverySession; phone: string; screen?: Screen }
           | null;
         if (draft && draft.lockerCode === scannedLockerCode && new Date(draft.session.sessionExpiresAt).getTime() > Date.now()) {
           storeSession(draft.session);
+          if (draft.screen && ["waiting", "compartment", "closing"].includes(draft.screen)) setScreen("waiting");
           if (draft.phone) {
             phoneTouched.current = true;
             setPhone(draft.phone);
@@ -574,8 +597,13 @@ export function DeliveryFlow() {
       inFlight = true;
       try {
         const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
-        if (cancelled) return;
-        setApiError("");
+        if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        setWaitingPollError((current) => current?.sessionId === deliverySession.id ? null : current);
+        setCanCancel(status.status === "PendingApproval");
+        if (cancelPending.current) {
+          timer = window.setTimeout(poll, 2000);
+          return;
+        }
         if (status.approvalExpiresAt) {
           const deadline = new Date(status.approvalExpiresAt).getTime();
           const startedAt = submittedAt.current ?? Date.now();
@@ -609,12 +637,18 @@ export function DeliveryFlow() {
           return;
         }
         if (status.status === "Rejected") return setScreen("rejected");
-        if (status.status === "Expired" || status.status === "Cancelled") return setScreen("expired");
+        if (status.status === "Cancelled") {
+          clearDraft();
+          storeSession(null);
+          setScreen("cancelled");
+          return;
+        }
+        if (status.status === "Expired") return setScreen("expired");
         if (status.status === "Failed") return setScreen(status.failureCode === "NoCompartment" ? "full" : "door-timeout");
         timer = window.setTimeout(poll, 2000);
       } catch (error) {
-        if (cancelled) return;
-        setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu.");
+        if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        setWaitingPollError({ sessionId: deliverySession.id, message: error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu." });
         timer = window.setTimeout(poll, 3000);
       } finally {
         inFlight = false;
@@ -637,7 +671,7 @@ export function DeliveryFlow() {
       document.removeEventListener("visibilitychange", resumePolling);
       window.removeEventListener("online", resumePolling);
     };
-  }, [deliverySession, screen]);
+  }, [deliverySession, screen, clearDraft, storeSession]);
 
   useEffect(() => {
     if (screen !== "waiting" || !approvalDeadline) return;
@@ -645,7 +679,7 @@ export function DeliveryFlow() {
     const updateCountdown = () => {
       const remaining = secondsUntil(approvalDeadline);
       setApprovalSeconds(remaining);
-      if (remaining === 0) setScreen("expired");
+      // The server decides expiry; approval may have won as the countdown reached zero.
     };
 
     updateCountdown();
@@ -654,8 +688,8 @@ export function DeliveryFlow() {
   }, [approvalDeadline, screen]);
 
   useEffect(() => {
-    if (!deliverySession || !["parcel", "recipient"].includes(screen)) return;
-    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone }));
+    if (!deliverySession || !["parcel", "recipient", "waiting", "compartment", "closing"].includes(screen)) return;
+    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen }));
   }, [deliverySession, lockerCode, phone, screen]);
 
   // Looks the recipient up once a full number is present, so the Shipper can compare the name with the waybill.
@@ -684,6 +718,8 @@ export function DeliveryFlow() {
         setRecipientName("");
         if (error instanceof DeliveryApiError && error.code === "delivery/recipient_not_found") {
           setRecipientStatus("not-found");
+        } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
+          setRecipientStatus("cannot-receive");
         } else if (error instanceof DeliveryApiError && error.code === "delivery/lookup_limit_reached") {
           setRecipientStatus("limit");
         } else {
@@ -701,27 +737,38 @@ export function DeliveryFlow() {
   }, [imageUrl]);
 
   useEffect(() => {
-    if (screen !== "receive-opened" || !pickupSession) return;
+    if (!["receive-details", "receive-open-failed", "receive-opened"].includes(screen) || !pickupSession) return;
     let cancelled = false;
+    let inFlight = false;
     let timer: number | undefined;
+    const generation = pickupRun.current;
 
     const poll = async () => {
-      if (cancelled || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (cancelled || inFlight || document.visibilityState !== "visible" || !navigator.onLine) return;
+      if (new Date(pickupSession.expiresAt).getTime() <= Date.now()) { clearPickupAccess(); return; }
+      inFlight = true;
       try {
-        await getReturnPickup(pickupSession);
+        const current = await getReturnPickup(pickupSession);
+        if (cancelled || generation !== pickupRun.current) return;
+        if (current.completed === true) {
+          pickupRun.current++;
+          setPickupCompartmentCode(current.compartmentCode);
+          setPickupSession(null);
+          setOtp("");
+          setScreen("receive-success");
+          return;
+        }
+        setApiError("");
         if (!cancelled) timer = window.setTimeout(poll, 2000);
       } catch (error) {
-        if (cancelled) return;
-        if (error instanceof DeliveryApiError && error.status === 409) {
-          setApiError("");
-          setPickupCompartmentCode(pickupSession.compartmentCode);
-          setPickupSession(null);
-          setScreen("receive-success");
+        if (cancelled || generation !== pickupRun.current) return;
+        if (error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)) {
+          clearPickupAccess();
           return;
         }
         setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái cửa tủ.");
         timer = window.setTimeout(poll, 3000);
-      }
+      } finally { inFlight = false; }
     };
 
     const resumePolling = () => {
@@ -740,10 +787,16 @@ export function DeliveryFlow() {
       document.removeEventListener("visibilitychange", resumePolling);
       window.removeEventListener("online", resumePolling);
     };
-  }, [pickupSession, screen]);
+  }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    setWaitingPollError(null);
+    pickupRun.current++;
     setScreen("welcome");
+    setCanCancel(false);
+    setConfirmingCancel(false);
+    setIsCancelling(false);
+    cancelPending.current = false;
     setPhone("");
     phoneTouched.current = false;
     scanRun.current += 1;
@@ -837,13 +890,22 @@ export function DeliveryFlow() {
       return;
     }
     setIsVerifyingPickup(true);
+    const generation = ++pickupRun.current;
     try {
       const session = await validateReturnPickup(lockerCode, otp);
+      if (generation !== pickupRun.current) return;
+      setOtp("");
       setPickupSession(session);
       setPickupCompartmentCode(session.compartmentCode);
       setScreen("receive-details");
     } catch (error) {
-      setOtpError(error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
+      if (generation !== pickupRun.current) return;
+      setPickupSession(null);
+      setPickupCompartmentCode("");
+      setOtp("");
+      setOtpError(error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)
+        ? "Mã không còn hiệu lực hoặc chưa sẵn sàng. Liên hệ cư dân hoặc người vận hành tủ."
+        : error instanceof Error ? error.message : "Mã lấy hàng không hợp lệ.");
     } finally {
       setIsVerifyingPickup(false);
     }
@@ -853,10 +915,25 @@ export function DeliveryFlow() {
     if (!pickupSession) return;
     setApiError("");
     setOpeningDoor(true);
+    const generation = pickupRun.current;
     try {
-      setPickupSession(await openReturnPickup(pickupSession));
+      const current = await getReturnPickup(pickupSession);
+      if (generation !== pickupRun.current) return;
+      if (current.completed === true) {
+        pickupRun.current++;
+        setPickupCompartmentCode(current.compartmentCode);
+        setPickupSession(null);
+        setOtp("");
+        setScreen("receive-success");
+        return;
+      }
+      const opened = await openReturnPickup(current);
+      if (generation !== pickupRun.current) return;
+      setPickupSession(opened);
       setScreen("receive-opened");
     } catch (error) {
+      if (generation !== pickupRun.current) return;
+      if (error instanceof DeliveryApiError && [401, 403, 404, 409, 410].includes(error.status)) { clearPickupAccess(); return; }
       setApiError(error instanceof Error ? error.message : "Không thể mở ngăn tủ.");
       setScreen("receive-open-failed");
     } finally { setOpeningDoor(false); }
@@ -992,11 +1069,40 @@ export function DeliveryFlow() {
     } catch (error) {
       if (error instanceof DeliveryApiError && error.status === 404) {
         setScreen("not-found");
+      } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
+        setRecipientStatus("cannot-receive");
+        setRecipientName("");
       } else {
         setApiError(error instanceof Error ? error.message : "Không thể gửi yêu cầu giao hàng.");
       }
     } finally {
       setIsSendingRequest(false);
+    }
+  };
+
+  const cancelWaitingDelivery = async () => {
+    const session = deliverySessionRef.current;
+    if (!session || cancelPending.current) return;
+    cancelPending.current = true;
+    setIsCancelling(true);
+    setApiError("");
+    try {
+      const result = await cancelDelivery(session.id, session.guestSessionToken);
+      // Cancelled is enum value 7 in the existing summary contract.
+      if (result.status !== 7) throw new Error("Chưa xác nhận được kết quả hủy. Đang tải lại trạng thái.");
+      clearDraft();
+      storeSession(null);
+      setCanCancel(false);
+      setScreen("cancelled");
+    } catch (error) {
+      setApiError(error instanceof DeliveryApiError && error.status === 409
+        ? "Yêu cầu không còn chờ duyệt nên không thể hủy. Hệ thống đang tải lại kết quả; nếu không thể tiếp tục giao, hãy báo sự cố."
+        : error instanceof Error ? error.message : "Chưa xác nhận hủy thành công. Vui lòng kiểm tra lại trạng thái.");
+      if (error instanceof DeliveryApiError && error.status === 409) setCanCancel(false);
+    } finally {
+      cancelPending.current = false;
+      setIsCancelling(false);
+      setConfirmingCancel(false);
     }
   };
 
@@ -1195,7 +1301,7 @@ export function DeliveryFlow() {
               <span className="mx-auto flex size-20 items-center justify-center rounded-full bg-[#eaf9ef] text-[#20a555] shadow-[0_12px_32px_rgba(32,165,85,.14)]">
                 <CircleCheckFill className="size-11" />
               </span>
-              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Ngăn {pickupSession?.compartmentCode} đã mở</h1>
+              <h1 className="mt-5 text-[2rem] font-extrabold tracking-[-0.05em] text-[#171717]">Đã gửi lệnh mở ngăn {pickupSession?.compartmentCode}</h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
                 Lấy kiện hàng ra khỏi ngăn và đóng cửa tủ sau khi hoàn tất.
               </p>
@@ -1243,6 +1349,17 @@ export function DeliveryFlow() {
           </div>
         );
 
+      case "receive-unavailable":
+        return (
+          <StatusScreen
+            tone="warning"
+            icon={<TriangleExclamation className="size-11" />}
+            title="Quyền nhận không còn khả dụng"
+            description="Mã hoặc phiên nhận đã hết hiệu lực, bị thu hồi hoặc trạng thái đã thay đổi. Chưa có xác nhận lấy hàng thành công. Vui lòng liên hệ cư dân hoặc người vận hành tủ; không tiếp tục mở ngăn bằng mã cũ."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
+        );
+
       case "receive-success":
         return (
           <StatusScreen
@@ -1266,7 +1383,7 @@ export function DeliveryFlow() {
                  Không thể mở ngăn {pickupSession?.compartmentCode}
               </h1>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[#697386]">
-                Tủ chưa phản hồi yêu cầu mở ngăn. Kiện hàng vẫn đang được khóa an toàn.
+                Chưa xác nhận được kết quả mở ngăn. Kiểm tra trạng thái trước khi thử lại; liên hệ người vận hành nếu cửa hoặc đồ có bất thường.
               </p>
             </div>
 
@@ -1429,6 +1546,9 @@ export function DeliveryFlow() {
                   {recipientStatus === "not-found" ? (
                     <p className="font-medium text-[#e5484d]">Số này chưa đăng ký nhận hàng tại tủ này. Kiểm tra lại số trên vận đơn.</p>
                   ) : null}
+                  {recipientStatus === "cannot-receive" ? (
+                    <p className="font-medium text-[#e5484d]">Cư dân này tạm thời không thể nhận thêm kiện hàng. Vui lòng liên hệ cư dân hoặc ban quản lý.</p>
+                  ) : null}
                   {recipientStatus === "limit" ? (
                     <p className="font-medium text-[#e5484d]">Đã hết số lần tra cứu của phiên này. Vui lòng báo sự cố hoặc bắt đầu phiên gửi mới.</p>
                   ) : null}
@@ -1508,8 +1628,23 @@ export function DeliveryFlow() {
               </Card.Content>
             </Card>
 
-            <div className="mt-auto pt-6">
-              <Button fullWidth className={SECONDARY_BUTTON_CLASS} variant="outline" onPress={reset}>Về trang đầu</Button>
+            {waitingError ? <div className="pt-4"><ApiErrorCard message={waitingError} /></div> : null}
+            <div className="mt-auto space-y-3 pt-6">
+              {canCancel && !confirmingCancel ? (
+                <Button fullWidth variant="danger-soft" onPress={() => setConfirmingCancel(true)}>Hủy giao</Button>
+              ) : null}
+              {confirmingCancel ? (
+                <Card>
+                  <Card.Content className="gap-3">
+                    <p className="font-semibold">Xác nhận hủy yêu cầu giao?</p>
+                    <p className="text-sm text-muted">Chỉ hủy khi cư dân chưa phê duyệt. Kết quả cuối cùng do hệ thống xác nhận.</p>
+                    <Button fullWidth isPending={isCancelling} variant="danger" onPress={cancelWaitingDelivery}>Xác nhận hủy giao</Button>
+                    <Button fullWidth isDisabled={isCancelling} variant="secondary" onPress={() => setConfirmingCancel(false)}>Tiếp tục chờ</Button>
+                  </Card.Content>
+                </Card>
+              ) : null}
+              {!canCancel ? <p className="text-center text-sm text-muted">Chỉ yêu cầu đang chờ duyệt mới được hủy. Nếu đã được duyệt và không thể tiếp tục giao, hãy báo sự cố.</p> : null}
+              {reportIncidentLink}
             </div>
           </div>
         );
@@ -1560,9 +1695,13 @@ export function DeliveryFlow() {
               </>
             }
             actions={
+              <>
               <Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={() => setScreen("closing")}>
                 <Check className="size-5" /> Đã đặt kiện hàng
               </Button>
+              <p className="text-center text-sm text-muted">Yêu cầu đã được duyệt nên không thể hủy. Hãy báo sự cố nếu không thể hoàn tất giao hàng.</p>
+              {reportIncidentLink}
+              </>
             }
           />
         );
@@ -1639,6 +1778,17 @@ export function DeliveryFlow() {
           />
         );
 
+      case "cancelled":
+        return (
+          <StatusScreen
+            tone="warning"
+            icon={<Xmark className="size-10" />}
+            title="Đã hủy yêu cầu giao"
+            description="Hệ thống đã xác nhận hủy trước khi cư dân phê duyệt. Cư dân đã được thông báo; yêu cầu này không thể tiếp tục mở ngăn."
+            actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
+          />
+        );
+
       case "rejected":
         return (
           <StatusScreen
@@ -1656,7 +1806,7 @@ export function DeliveryFlow() {
             tone="warning"
             icon={<Clock className="size-10" />}
             title="Yêu cầu đã hết hạn"
-            description="Người nhận chưa phản hồi trong thời gian quy định. Lượt gửi đã được hủy."
+            description="Yêu cầu đã hết thời gian xử lý theo hệ thống. Lượt gửi này không thể tiếp tục."
             actions={<Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>}
           />
         );
@@ -1796,6 +1946,7 @@ export function DeliveryFlow() {
           onReport={openIncidentReport}
           onSend={beginSend}
         />
+        {lockerCode ? <div className="mx-auto max-w-lg px-5 pb-6"><LockerSupport key={lockerCode} lockerCode={lockerCode} /></div> : null}
         {photoInputs}
       </>
     );
@@ -1807,6 +1958,7 @@ export function DeliveryFlow() {
         <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing", "invalid-locker"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
         <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : ["receive-details", "receive-open-failed", "receive-opened", "receive-success"].includes(screen) ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
           {content}
+          <LockerSupport key={lockerCode} lockerCode={lockerCode} reference={screen === "incident-success" ? incidentReference : screen.startsWith("receive-") ? pickupSession?.returnRequestId : deliverySession?.id} />
         </main>
       </div>
       {photoInputs}
