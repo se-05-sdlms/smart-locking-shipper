@@ -463,11 +463,14 @@ export function DeliveryFlow() {
   const [ocrPhones, setOcrPhones] = useState<string[]>([]);
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [apiError, setApiError] = useState("");
+  // Poll recovery must not clear a newer cancel/submit error.
+  const [waitingPollError, setWaitingPollError] = useState<{ sessionId: string; message: string } | null>(null);
   const [canCancel, setCanCancel] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const cancelPending = useRef(false);
   const [deliverySession, setDeliverySession] = useState<DeliverySession | null>(null);
+  const waitingError = apiError || (waitingPollError && waitingPollError.sessionId === deliverySession?.id ? waitingPollError.message : "");
   const [compartmentCode, setCompartmentCode] = useState("");
   const [parcelId, setParcelId] = useState("");
   const [approvalDeadline, setApprovalDeadline] = useState<number | null>(null);
@@ -595,6 +598,7 @@ export function DeliveryFlow() {
       try {
         const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
         if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        setWaitingPollError((current) => current?.sessionId === deliverySession.id ? null : current);
         setCanCancel(status.status === "PendingApproval");
         if (cancelPending.current) {
           timer = window.setTimeout(poll, 2000);
@@ -643,8 +647,8 @@ export function DeliveryFlow() {
         if (status.status === "Failed") return setScreen(status.failureCode === "NoCompartment" ? "full" : "door-timeout");
         timer = window.setTimeout(poll, 2000);
       } catch (error) {
-        if (cancelled) return;
-        setApiError(error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu.");
+        if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        setWaitingPollError({ sessionId: deliverySession.id, message: error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu." });
         timer = window.setTimeout(poll, 3000);
       } finally {
         inFlight = false;
@@ -786,6 +790,7 @@ export function DeliveryFlow() {
   }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    setWaitingPollError(null);
     pickupRun.current++;
     setScreen("welcome");
     setCanCancel(false);
@@ -1623,7 +1628,7 @@ export function DeliveryFlow() {
               </Card.Content>
             </Card>
 
-            {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
+            {waitingError ? <div className="pt-4"><ApiErrorCard message={waitingError} /></div> : null}
             <div className="mt-auto space-y-3 pt-6">
               {canCancel && !confirmingCancel ? (
                 <Button fullWidth variant="danger-soft" onPress={() => setConfirmingCancel(true)}>Hủy giao</Button>
