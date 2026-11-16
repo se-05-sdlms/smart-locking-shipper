@@ -68,6 +68,7 @@ type Screen =
   | "parcel"
   | "waiting"
   | "delivery-unavailable"
+  | "delivery-incomplete"
   | "searching"
   | "compartment"
   | "closing"
@@ -462,6 +463,7 @@ export function DeliveryFlow() {
   // Poll recovery must not clear a newer cancel/submit error.
   const [waitingPollError, setWaitingPollError] = useState<{ sessionId: string; message: string } | null>(null);
   const [unavailableDeliveryId, setUnavailableDeliveryId] = useState("");
+  const [incompleteStatus, setIncompleteStatus] = useState("");
   const [canCancel, setCanCancel] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -484,6 +486,9 @@ export function DeliveryFlow() {
   const [doorSeconds, setDoorSeconds] = useState<number | null>(null);
   const [doorTotalSeconds, setDoorTotalSeconds] = useState<number | null>(null);
   const [checkingDoor, setCheckingDoor] = useState(false);
+  const reconcileDelivery = useRef<((manual?: boolean) => Promise<void>) | null>(null);
+  const reconciledDoorDeadline = useRef<string | null>(null);
+  const openAttemptSession = useRef<string | null>(null);
   const [openingDoor, setOpeningDoor] = useState(false);
   const [pickupSession, setPickupSession] = useState<ReturnPickupSession | null>(null);
   const [pickupCompartmentCode, setPickupCompartmentCode] = useState("");
@@ -545,10 +550,15 @@ export function DeliveryFlow() {
       // Resume an unfinished drop-off after a reload or app switch; the photo itself cannot be restored.
       try {
         const draft = JSON.parse(window.sessionStorage.getItem(DRAFT_STORAGE_KEY) ?? "null") as
-          | { lockerCode: string; session: DeliverySession; phone: string; screen?: Screen }
+          | { lockerCode: string; session: DeliverySession; phone: string; screen?: Screen; openRequested?: boolean }
           | null;
-        if (draft && draft.lockerCode === scannedLockerCode && new Date(draft.session.sessionExpiresAt).getTime() > Date.now()) {
+        const unfinished = draft?.screen && ["waiting", "compartment", "closing"].includes(draft.screen);
+        if (draft && draft.lockerCode === scannedLockerCode &&
+          (unfinished || draft.openRequested || new Date(draft.session.sessionExpiresAt).getTime() > Date.now())) {
           storeSession(draft.session);
+          if (draft.openRequested || draft.screen === "compartment" || draft.screen === "closing") {
+            openAttemptSession.current = JSON.stringify([draft.session.id, draft.session.guestSessionToken]);
+          }
           if (draft.screen && ["waiting", "compartment", "closing"].includes(draft.screen)) setScreen("waiting");
           if (draft.phone) {
             phoneTouched.current = true;
@@ -577,20 +587,12 @@ export function DeliveryFlow() {
   }, [storeSession]);
 
   useEffect(() => {
-    if (screen !== "closing" || !doorDeadline) return;
-    const updateDoorCountdown = () => setDoorSeconds(secondsUntil(doorDeadline));
-    updateDoorCountdown();
-    const timer = window.setInterval(updateDoorCountdown, 1000);
-    return () => window.clearInterval(timer);
-  }, [screen, doorDeadline]);
-
-  useEffect(() => {
-    if (screen !== "waiting" || !deliverySession) return;
+    if (!["waiting", "compartment", "closing"].includes(screen) || !deliverySession) return;
     let cancelled = false;
     let inFlight = false;
     let timer: number | undefined;
 
-    const poll = async () => {
+    const poll = async (manual = false) => {
       if (
         cancelled ||
         inFlight ||
@@ -599,6 +601,9 @@ export function DeliveryFlow() {
       )
         return;
       inFlight = true;
+      if (timer) window.clearTimeout(timer);
+      timer = undefined;
+      if (manual) setCheckingDoor(true);
       try {
         const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
         if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
@@ -615,13 +620,22 @@ export function DeliveryFlow() {
           setApprovalSeconds(secondsUntil(deadline));
           setApprovalTotalSeconds((total) => total ?? Math.max(1, Math.round((deadline - startedAt) / 1000)));
         }
-        if (status.status === "Approved") {
+        if (status.status === "Approved" && screen === "waiting") {
+          if (openAttemptSession.current === JSON.stringify([deliverySession.id, deliverySession.guestSessionToken])) {
+            setWaitingPollError({ sessionId: deliverySession.id, message: "Đã gửi yêu cầu mở ngăn nhưng chưa xác nhận kết quả. Hệ thống đang kiểm tra lại; hãy liên hệ người vận hành nếu chưa thể tiếp tục." });
+            timer = window.setTimeout(() => void poll(), 2000);
+            return;
+          }
+          // Persist before the mutation: a lost response or reload must not issue another OPEN.
+          openAttemptSession.current = JSON.stringify([deliverySession.id, deliverySession.guestSessionToken]);
+          window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen, openRequested: true }));
           const reservation = await reserveCompartment(deliverySession.id, deliverySession.guestSessionToken);
           if (cancelled) return;
           setCompartmentCode(reservation.compartmentCode);
           const reservationDeadline = new Date(reservation.reservationExpiresAt).getTime();
           setDoorDeadline(reservationDeadline);
           setDoorTotalSeconds(secondsUntil(reservationDeadline));
+          setApiError("");
           setScreen("compartment");
           return;
         }
@@ -632,12 +646,27 @@ export function DeliveryFlow() {
             setDoorDeadline(reservationDeadline);
             setDoorTotalSeconds((total) => total ?? secondsUntil(reservationDeadline));
           }
-          setScreen("compartment");
-          return;
+          if (screen === "waiting") {
+            setApiError("");
+            setScreen("compartment");
+            return;
+          }
         }
         if (status.status === "Deposited") {
           setParcelId(status.parcelId ?? "");
           setScreen("success");
+          return;
+        }
+        if (["Expired", "Failed", "Rejected", "Cancelled"].includes(status.status) &&
+          (status.compartmentCode || screen === "compartment" || screen === "closing")) {
+          // A terminal request is not proof of physical custody or door state.
+          cancelled = true;
+          if (status.compartmentCode) setCompartmentCode(status.compartmentCode);
+          setUnavailableDeliveryId(deliverySession.id);
+          setIncompleteStatus(({ Expired: "Đã hết hạn", Failed: "Đã kết thúc do lỗi", Rejected: "Đã từ chối", Cancelled: "Đã hủy" } as Record<string, string>)[status.status]);
+          clearDraft();
+          storeSession(null);
+          setScreen("delivery-incomplete");
           return;
         }
         if (status.status === "Rejected") return setScreen("rejected");
@@ -649,7 +678,8 @@ export function DeliveryFlow() {
         }
         if (status.status === "Expired") return setScreen("expired");
         if (status.status === "Failed") return setScreen(status.failureCode === "NoCompartment" ? "full" : "door-timeout");
-        timer = window.setTimeout(poll, 2000);
+        if (manual) setWaitingPollError({ sessionId: deliverySession.id, message: "Hệ thống chưa xác nhận hoàn tất giao hàng. Vui lòng đóng cửa và chờ đồng bộ trạng thái." });
+        timer = window.setTimeout(() => void poll(), 2000);
       } catch (error) {
         if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
         if (error instanceof DeliveryApiError && (error.status === 401 ||
@@ -668,9 +698,10 @@ export function DeliveryFlow() {
           return;
         }
         setWaitingPollError({ sessionId: deliverySession.id, message: error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu." });
-        timer = window.setTimeout(poll, 3000);
+        timer = window.setTimeout(() => void poll(), 3000);
       } finally {
         inFlight = false;
+        if (manual && !cancelled) setCheckingDoor(false);
       }
     };
 
@@ -681,16 +712,36 @@ export function DeliveryFlow() {
       void poll();
     };
 
+    reconcileDelivery.current = poll;
     void poll();
     document.addEventListener("visibilitychange", resumePolling);
     window.addEventListener("online", resumePolling);
     return () => {
       cancelled = true;
+      if (reconcileDelivery.current === poll) reconcileDelivery.current = null;
+      setCheckingDoor(false);
       if (timer) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", resumePolling);
       window.removeEventListener("online", resumePolling);
     };
-  }, [deliverySession, screen, clearDraft, storeSession]);
+  }, [deliverySession, screen, clearDraft, storeSession, lockerCode, phone]);
+
+  useEffect(() => {
+    if (!["compartment", "closing"].includes(screen) || !doorDeadline || !deliverySession) return;
+    const deadlineKey = `${deliverySession.id}:${doorDeadline}`;
+    const updateDoorCountdown = () => {
+      const remaining = secondsUntil(doorDeadline);
+      setDoorSeconds(remaining);
+      if (remaining === 0 && reconciledDoorDeadline.current !== deadlineKey) {
+        reconciledDoorDeadline.current = deadlineKey;
+        // The server may still be processing the final door event. Re-read, never infer success/expiry.
+        void reconcileDelivery.current?.();
+      }
+    };
+    updateDoorCountdown();
+    const timer = window.setInterval(updateDoorCountdown, 1000);
+    return () => window.clearInterval(timer);
+  }, [screen, doorDeadline, deliverySession]);
 
   useEffect(() => {
     if (screen !== "waiting" || !approvalDeadline) return;
@@ -708,7 +759,7 @@ export function DeliveryFlow() {
 
   useEffect(() => {
     if (!deliverySession || !["parcel", "recipient", "waiting", "compartment", "closing"].includes(screen)) return;
-    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen }));
+    window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen, openRequested: openAttemptSession.current === JSON.stringify([deliverySession.id, deliverySession.guestSessionToken]) }));
   }, [deliverySession, lockerCode, phone, screen]);
 
   useEffect(() => {
@@ -770,7 +821,10 @@ export function DeliveryFlow() {
   }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    openAttemptSession.current = null;
+    reconciledDoorDeadline.current = null;
     setUnavailableDeliveryId("");
+    setIncompleteStatus("");
     setWaitingPollError(null);
     pickupRun.current++;
     setScreen("welcome");
@@ -1106,21 +1160,7 @@ export function DeliveryFlow() {
   };
 
   const verifyDoor = async () => {
-    if (!deliverySession) return;
-    setCheckingDoor(true);
-    setApiError("");
-    try {
-      const status = await getDeliveryStatus(deliverySession.id, deliverySession.guestSessionToken);
-      if (status.status !== "Deposited") {
-        throw new Error("Hệ thống chưa ghi nhận cửa đã đóng. Vui lòng chờ vài giây rồi thử lại.");
-      }
-      setParcelId(status.parcelId ?? "");
-      setScreen("success");
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Chưa thể xác nhận cửa đã đóng.");
-    } finally {
-      setCheckingDoor(false);
-    }
+    await reconcileDelivery.current?.(true);
   };
 
   const goBack = () => {
@@ -1660,6 +1700,18 @@ export function DeliveryFlow() {
           />
         );
 
+      case "delivery-incomplete":
+        return (
+          <StatusScreen
+            tone="warning"
+            icon={<TriangleExclamation className="size-10" />}
+            title="Lượt gửi chưa hoàn tất"
+            description="Hệ thống đã kết thúc yêu cầu và chưa xác nhận giao hàng thành công. Nếu đã đặt kiện hàng hoặc cửa đã mở, hãy liên hệ người vận hành để kiểm tra trước khi tạo lượt giao khác."
+            details={<InfoRows rows={[["Trạng thái yêu cầu", incompleteStatus], ["Mã yêu cầu", unavailableDeliveryId], ["Locker", lockerCode], ["Ngăn", compartmentCode]]} />}
+            actions={<><Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>{reportIncidentLink}</>}
+          />
+        );
+
       case "searching":
         return (
           <div className="flex flex-1 flex-col items-center justify-center text-center" aria-live="polite">
@@ -1679,8 +1731,8 @@ export function DeliveryFlow() {
           <StatusScreen
             tone="success"
             icon={<LockOpen className="size-10" />}
-            title="Ngăn đã mở"
-            description="Đặt kiện hàng vào ngăn được chỉ định rồi đóng chặt cửa."
+            title="Ngăn dành cho kiện hàng"
+            description="Kiểm tra cửa ngăn được chỉ định. Khi cửa đã mở, đặt kiện hàng vào rồi đóng chặt cửa."
             details={
               <>
                 <Card className={`gap-0 p-0 ${SURFACE_CARD_CLASS}`}>
@@ -1691,7 +1743,7 @@ export function DeliveryFlow() {
                         <p className="mt-1 text-[4.2rem] font-black leading-none tracking-[-0.08em] text-[#ff5b16]">{compartmentCode}</p>
                       </div>
                       <Chip className="shrink-0" color="success" size="sm" variant="soft">
-                        <LockOpen className="size-3.5" /> Đang mở
+                        <LockOpen className="size-3.5" /> Đã phân ngăn
                       </Chip>
                     </div>
                     <div className="mt-4 flex items-center gap-2 text-sm font-medium text-muted">
@@ -1703,6 +1755,7 @@ export function DeliveryFlow() {
                 <HintCard icon={<Box className="size-5" />}>
                   <strong>Đặt kiện hàng vào ngăn {compartmentCode}</strong>, sau đó đóng cửa để hoàn tất.
                 </HintCard>
+                {waitingError ? <ApiErrorCard message={waitingError} /> : null}
               </>
             }
             actions={
@@ -1738,10 +1791,10 @@ export function DeliveryFlow() {
             </div>
             <div className="mt-6">
               <HintCard icon={<Lock className="size-5" />}>
-                <strong>Cửa ngăn vẫn đang mở.</strong> Đẩy cửa đóng chặt trước khi rời đi.
+                <strong>Kiểm tra và đóng chặt cửa ngăn.</strong> Chờ hệ thống xác nhận hoàn tất trước khi rời đi.
               </HintCard>
             </div>
-            {apiError ? <div className="pt-4"><ApiErrorCard message={apiError} /></div> : null}
+            {waitingError ? <div className="pt-4"><ApiErrorCard message={waitingError} /></div> : null}
             <div className="mt-auto pt-6">
               <Button fullWidth className={PRIMARY_BUTTON_CLASS} isPending={checkingDoor} size="lg" onPress={verifyDoor}>
                 {checkingDoor ? <><Spinner color="current" size="sm" /> Đang kiểm tra cửa...</> : "Tôi đã đóng cửa"}
@@ -1839,7 +1892,7 @@ export function DeliveryFlow() {
             tone="danger"
             icon={<TriangleExclamation className="size-10" />}
             title="Lượt gửi chưa hoàn tất"
-            description={`Cửa ngăn chưa được đóng trong thời gian cho phép hoặc tủ gặp sự cố. Cảnh báo vận hành đã được tạo cho Locker ${lockerCode}.`}
+            description={`Hệ thống chưa xác nhận giao hàng thành công tại Locker ${lockerCode}. Hãy liên hệ người vận hành nếu không thể hoàn tất hoặc đã đặt kiện hàng vào ngăn.`}
             actions={<><Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>{reportIncidentLink}</>}
           />
         );
