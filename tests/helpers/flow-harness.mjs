@@ -15,7 +15,7 @@ export class DeliveryApiError extends Error {
 // Execute the production hook with deterministic effects/timers and controlled API outcomes.
 // No source matching, snapshots, dependencies or live server are needed.
 export function harness(flow = false, options = {}) {
-  const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map();
+  const slots = [], effects = [], timers = new Map(), intervals = new Map(), calls = [], listeners = new Map();
   const events = {
     addEventListener(name, callback) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(callback); },
     removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
@@ -65,7 +65,7 @@ export function harness(flow = false, options = {}) {
     submitDelivery(...request) { const response = deferred(); submits.push({ request, response }); return response.promise; },
     ...options.api,
   };
-  const data = new Map([['boxora.delivery.draft', JSON.stringify({ lockerCode: 'LKR-A', session: { ...session(), sessionExpiresAt: '2099-01-01' } })]]);
+  const data = new Map([['boxora.delivery.draft', JSON.stringify(options.draft ?? { lockerCode: 'LKR-A', session: { ...session(), sessionExpiresAt: '2099-01-01' } })]]);
   const card = Object.assign(() => {}, { Content: 'Card.Content' });
   const ui = new Proxy({ Card: card }, { get: (target, name) => target[name] ?? name });
   const tag = (type, props) => ({ type, props: props ?? {} });
@@ -83,10 +83,13 @@ export function harness(flow = false, options = {}) {
     },
     window: {
       location: { search: options.search ?? '?locker=LKR-A' },
-      sessionStorage: { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value), removeItem: key => data.delete(key) },
+      sessionStorage: { getItem: key => data.get(key), setItem: (key, value) => {
+        if (options.failOpenMarkerStorage && JSON.parse(value).openRequested) throw new Error('Storage unavailable');
+        data.set(key, value);
+      }, removeItem: key => data.delete(key) },
       setTimeout(fn) { const i = ++nextTimer; timers.set(i, fn); return i; },
       clearTimeout(i) { timers.delete(i); },
-      setInterval() { return ++nextTimer; }, clearInterval() {},
+      setInterval(fn) { const i = ++nextTimer; intervals.set(i, fn); return i; }, clearInterval(i) { intervals.delete(i); },
       ...events,
     },
     URLSearchParams,
@@ -125,6 +128,8 @@ export function harness(flow = false, options = {}) {
     calls, submits, incidents,
     get draft() { return data.get('boxora.delivery.draft'); },
     get timerCount() { return timers.size; },
+    get intervalCount() { return intervals.size; },
+    tick() { for (const fn of [...intervals.values()]) fn(); },
     dispatch(name) { for (const callback of [...(listeners.get(name) ?? [])]) callback(); },
     text: () => text(result),
     find: type => nodes(result).filter(node => node.type === type || node.type?.name === type),
