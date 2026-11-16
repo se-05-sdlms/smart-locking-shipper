@@ -67,6 +67,7 @@ type Screen =
   | "recipient"
   | "parcel"
   | "waiting"
+  | "delivery-unavailable"
   | "searching"
   | "compartment"
   | "closing"
@@ -460,6 +461,7 @@ export function DeliveryFlow() {
   const [apiError, setApiError] = useState("");
   // Poll recovery must not clear a newer cancel/submit error.
   const [waitingPollError, setWaitingPollError] = useState<{ sessionId: string; message: string } | null>(null);
+  const [unavailableDeliveryId, setUnavailableDeliveryId] = useState("");
   const [canCancel, setCanCancel] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -650,6 +652,21 @@ export function DeliveryFlow() {
         timer = window.setTimeout(poll, 2000);
       } catch (error) {
         if (cancelled || deliverySessionRef.current?.id !== deliverySession.id) return;
+        if (error instanceof DeliveryApiError && (error.status === 401 ||
+          (error.status === 404 && error.code === "delivery/not_found") ||
+          (error.status === 410 && error.code === "delivery/session_expired"))) {
+          // Invalidate immediately so a queued visibility/online event cannot retry this credential.
+          cancelled = true;
+          if (timer) window.clearTimeout(timer);
+          setUnavailableDeliveryId(deliverySession.id);
+          clearDraft();
+          storeSession(null);
+          setCanCancel(false);
+          setConfirmingCancel(false);
+          setWaitingPollError(null);
+          setScreen("delivery-unavailable");
+          return;
+        }
         setWaitingPollError({ sessionId: deliverySession.id, message: error instanceof Error ? error.message : "Không thể kiểm tra trạng thái yêu cầu." });
         timer = window.setTimeout(poll, 3000);
       } finally {
@@ -753,6 +770,7 @@ export function DeliveryFlow() {
   }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    setUnavailableDeliveryId("");
     setWaitingPollError(null);
     pickupRun.current++;
     setScreen("welcome");
@@ -1630,6 +1648,18 @@ export function DeliveryFlow() {
           </div>
         );
 
+      case "delivery-unavailable":
+        return (
+          <StatusScreen
+            tone="danger"
+            icon={<TriangleExclamation className="size-10" />}
+            title="Không thể tiếp tục theo dõi yêu cầu"
+            description="Phiên truy cập yêu cầu không còn dùng được. Chưa thể xác nhận kết quả giao hàng. Nếu đã đặt kiện hàng hoặc tủ đã mở, hãy liên hệ người vận hành trước khi tạo lượt giao khác."
+            details={<InfoRows rows={[["Mã yêu cầu", unavailableDeliveryId], ["Locker", lockerCode]]} />}
+            actions={<><Button fullWidth className={PRIMARY_BUTTON_CLASS} size="lg" onPress={reset}>Về trang đầu</Button>{reportIncidentLink}</>}
+          />
+        );
+
       case "searching":
         return (
           <div className="flex flex-1 flex-col items-center justify-center text-center" aria-live="polite">
@@ -1940,7 +1970,7 @@ export function DeliveryFlow() {
         <AppHeader isBackDisabled={openingDoor || ["receive-opened", "waiting", "searching", "compartment", "closing", "invalid-locker"].includes(screen)} lockerCode={lockerCode} goBack={goBack} />
         <main className={`safe-bottom flex flex-1 flex-col px-5 pb-6 sm:px-7 ${screen === "receive-otp" ? "bg-[#fffaf6] pt-0" : ["receive-details", "receive-open-failed", "receive-opened", "receive-success"].includes(screen) ? "bg-[#fffaf6] pt-5" : screen === "recipient" ? "pt-4" : "pt-7"}`}>
           {content}
-          <LockerSupport key={lockerCode} lockerCode={lockerCode} reference={screen === "incident-success" ? incidentReference : screen.startsWith("receive-") ? pickupSession?.returnRequestId : deliverySession?.id} />
+          <LockerSupport key={lockerCode} lockerCode={lockerCode} reference={screen === "incident-success" ? incidentReference : screen.startsWith("receive-") ? pickupSession?.returnRequestId : deliverySession?.id ?? (unavailableDeliveryId || undefined)} />
         </main>
       </div>
       {photoInputs}
