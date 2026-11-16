@@ -1,0 +1,127 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import vm from "node:vm";
+const ts = createRequire(import.meta.url)("typescript");
+export const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+export const session = (id = 'session-A', token = 'token-A') => ({ id, guestSessionToken: token });
+export class DeliveryApiError extends Error {
+  constructor(message, status, code) { super(message); this.status = status; this.code = code; }
+}
+
+// Execute the production hook with deterministic effects/timers and controlled API outcomes.
+// No source matching, snapshots, dependencies or live server are needed.
+export function harness(flow = false, options = {}) {
+  const slots = [], effects = [], timers = new Map(), calls = [];
+  let cursor = 0, nextTimer = 0, result, queued = false, mounted = true;
+  const submits = [];
+  let args = ['0901234567', session(), true, true, 0];
+  const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+  const schedule = () => {
+    if (queued || !mounted) return;
+    queued = true;
+    queueMicrotask(() => { queued = false; if (mounted) render(); });
+  };
+  const react = {
+    useState(initial) {
+      const index = cursor++;
+      slots[index] ??= { value: initial };
+      return [slots[index].value, value => {
+        if (typeof value === "function") value = value(slots[index].value);
+        if (Object.is(slots[index].value, value)) return;
+        slots[index].value = value; schedule();
+      }];
+    },
+    useRef(initial) { const i = cursor++; slots[i] ??= { current: initial }; return slots[i]; },
+    useCallback(fn, deps) {
+      const i = cursor++;
+      if (!same(slots[i]?.deps, deps)) slots[i] = { value: fn, deps };
+      return slots[i].value;
+    },
+    useEffect(fn, deps) {
+      const i = cursor++;
+      if (same(slots[i]?.deps, deps)) return;
+      const previous = slots[i];
+      const slot = { deps };
+      slots[i] = slot;
+      effects.push(() => { previous?.cleanup?.(); slot.cleanup = fn(); });
+    },
+  };
+  const incidents = [];
+  const api = {
+    validateReturnPickup: async () => ({ returnRequestId: "return-B", guestSessionToken: "pickup-B", compartmentCode: "A01", expiresAt: "2099-01-01" }),
+    getReturnPickup: async () => ({ completed: false }),
+    reportGuestIncident(...request) { const response = deferred(); incidents.push({ request, response }); return response.promise; },
+    DeliveryApiError,
+    resolveRecipient(...request) { const response = deferred(); calls.push({ request, response }); return response.promise; },
+    scanWaybill: async () => ({ status: 'Succeeded', phones: ['0901234567', '0909999999'], isMasked: false }),
+    submitDelivery(...request) { const response = deferred(); submits.push({ request, response }); return response.promise; },
+  };
+  const data = new Map([['boxora.delivery.draft', JSON.stringify({ lockerCode: 'LKR-A', session: { ...session(), sessionExpiresAt: '2099-01-01' } })]]);
+  const card = Object.assign(() => {}, { Content: 'Card.Content' });
+  const ui = new Proxy({ Card: card }, { get: (target, name) => target[name] ?? name });
+  const tag = (type, props) => ({ type, props: props ?? {} });
+  const compiledHook = { exports: {} };
+  const context = {
+    module: compiledHook, exports: compiledHook.exports, Error, URL, Date, console,
+    process: { env: { NODE_ENV: 'development' } },
+    createImageBitmap: async () => ({ width: 100, height: 100, close() {} }),
+    File: class { constructor(_parts, name) { this.name = name; } },
+    document: {
+      createElement: () => ({ getContext: () => ({ drawImage() {} }), toBlob: callback => callback({}) }),
+      addEventListener() {}, removeEventListener() {},
+    },
+    window: {
+      location: { search: options.search ?? '?locker=LKR-A' },
+      sessionStorage: { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value), removeItem: key => data.delete(key) },
+      setTimeout(fn) { const i = ++nextTimer; timers.set(i, fn); return i; },
+      clearTimeout(i) { timers.delete(i); },
+      addEventListener() {}, removeEventListener() {},
+    },
+    URLSearchParams,
+    require(name) {
+      if (name === 'react') return react;
+      if (name === './delivery-api') return api;
+      if (name === './use-recipient-verification') return hook;
+      if (name === 'react/jsx-runtime') return { jsx: tag, jsxs: tag, Fragment: 'Fragment' };
+      if (name === '@heroui/react' || name === '@gravity-ui/icons') return ui;
+      if (name === 'next/image') return { default: 'Image' };
+      if (name === './locker-support') return { LockerSupport: 'LockerSupport' };
+      throw new Error(`Unexpected import ${name}`);
+    },
+  };
+  function compile(file, target) {
+    vm.runInNewContext(ts.transpileModule(readFileSync(new URL(`../../src/app/${file}`, import.meta.url), 'utf8'), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX },
+    }).outputText, { ...context, module: target, exports: target.exports });
+  }
+  compile('use-recipient-verification.ts', compiledHook);
+  const hook = compiledHook.exports;
+  const flowModule = { exports: {} };
+  if (flow) {
+    context.URL = { createObjectURL: () => 'blob:fixture', revokeObjectURL() {} };
+    compile('delivery-flow.tsx', flowModule);
+  }
+  function render() { cursor = 0; result = flow ? flowModule.exports.DeliveryFlow() : hook.useRecipientVerification(...args); while (effects.length) effects.shift()(); }
+  function nodes(value, found = []) {
+    if (Array.isArray(value)) value.forEach(child => nodes(child, found));
+    else if (value && typeof value === 'object') { found.push(value); nodes(value.props?.children, found); nodes(value.props?.actions, found); nodes(value.props?.details, found); }
+    return found;
+  }
+  const text = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(text).join(' ') : value ? text(value.props?.children) : '';
+  render();
+  return {
+    calls, submits, incidents,
+    text: () => text(result),
+    find: type => nodes(result).filter(node => node.type === type || node.type?.name === type),
+    button: label => nodes(result).find(node => node.type === 'Button' && text(node).includes(label)),
+    get current() { return result; },
+    async flush() { for (let i = 0; i < 6; i++) await Promise.resolve(); },
+    update(changes) { args = args.map((value, i) => i in changes ? changes[i] : value); render(); },
+    debounce() { const pending = [...timers.values()]; timers.clear(); pending.forEach(fn => fn()); },
+    unmount() { mounted = false; slots.forEach(slot => slot?.cleanup?.()); },
+  };
+}

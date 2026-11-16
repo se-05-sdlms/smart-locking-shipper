@@ -497,9 +497,12 @@ export function DeliveryFlow() {
     setScreen("receive-unavailable");
   }, []);
   const [incidentOrigin, setIncidentOrigin] = useState<Screen>("welcome");
+  const [incidentSession, setIncidentSession] = useState<{ token: string; deliveryRequestId?: string; returnRequestId?: string } | null>(null);
+  const incidentPending = useRef(false);
   const [incidentType, setIncidentType] = useState<GuestIncidentType | "">("");
   const [incidentDescription, setIncidentDescription] = useState("");
   const [incidentError, setIncidentError] = useState("");
+  const [incidentSessionExpired, setIncidentSessionExpired] = useState(false);
   const [isSubmittingIncident, setIsSubmittingIncident] = useState(false);
   const [incidentReference, setIncidentReference] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
@@ -789,6 +792,7 @@ export function DeliveryFlow() {
     setOpeningDoor(false);
     setPickupSession(null);
     setPickupCompartmentCode("");
+    setIncidentSession(null);
     setIncidentType("");
     setIncidentDescription("");
     setIncidentError("");
@@ -796,7 +800,13 @@ export function DeliveryFlow() {
   };
 
   const openIncidentReport = () => {
+    setIncidentSessionExpired(false);
     setIncidentOrigin(screen);
+    // Capture the originating flow. A leftover session from another flow must never be linked.
+    const delivery = deliverySessionRef.current;
+    setIncidentSession(screen.startsWith("receive-")
+      ? pickupSession ? { token: pickupSession.guestSessionToken, returnRequestId: pickupSession.returnRequestId } : null
+      : screen !== "welcome" && delivery ? { token: delivery.guestSessionToken, deliveryRequestId: delivery.id } : null);
     setIncidentType(screen.startsWith("receive-") ? "Return" : "");
     setIncidentDescription("");
     setIncidentError("");
@@ -804,6 +814,7 @@ export function DeliveryFlow() {
   };
 
   const submitIncident = async () => {
+    if (incidentPending.current) return;
     const description = incidentDescription.trim();
     const type = INCIDENT_TYPES.find((item) => item.value === incidentType);
     if (!type) {
@@ -816,6 +827,7 @@ export function DeliveryFlow() {
     }
 
     setIncidentError("");
+    incidentPending.current = true;
     setIsSubmittingIncident(true);
     try {
       // Link the report to the guest flow in progress so operators see the related request.
@@ -824,9 +836,9 @@ export function DeliveryFlow() {
         type: type.value,
         title: `Shipper báo sự cố: ${type.label}`,
         description,
-        deliveryRequestId: pickupSession ? undefined : deliverySession?.id,
-        returnRequestId: pickupSession?.returnRequestId,
-      });
+        deliveryRequestId: incidentSession?.deliveryRequestId,
+        returnRequestId: incidentSession?.returnRequestId,
+      }, incidentSession?.token);
       setIncidentReference(incident.referenceCode);
       setScreen("incident-success");
     } catch (error) {
@@ -834,8 +846,12 @@ export function DeliveryFlow() {
         setScreen("invalid-locker");
         return;
       }
-      setIncidentError(error instanceof Error ? error.message : "Không thể gửi báo cáo sự cố. Vui lòng thử lại.");
+      setIncidentSessionExpired(error instanceof DeliveryApiError && [401, 410].includes(error.status));
+      setIncidentError(error instanceof DeliveryApiError && [401, 410].includes(error.status)
+        ? "Phiên giao hoặc lấy hàng đã hết hiệu lực. Vui lòng quay về trang đầu để báo sự cố tại tủ, hoặc bắt đầu lại luồng phù hợp."
+        : error instanceof Error ? error.message : "Không thể gửi báo cáo sự cố. Vui lòng thử lại.");
     } finally {
+      incidentPending.current = false;
       setIsSubmittingIncident(false);
     }
   };
@@ -1861,6 +1877,7 @@ export function DeliveryFlow() {
             </Card>
 
             {incidentError ? <div className="pt-4"><ApiErrorCard message={incidentError} /></div> : null}
+            {incidentSessionExpired ? <Button className="mt-3" variant="outline" onPress={reset}>Về trang đầu để báo sự cố tại tủ</Button> : null}
 
             <div className="mt-auto space-y-3 pt-6">
               <Button fullWidth className={PRIMARY_BUTTON_CLASS} isPending={isSubmittingIncident} size="lg" type="submit">
