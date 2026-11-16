@@ -170,17 +170,19 @@ export type GuestIncident = {
   createdAt: string;
 };
 
-export const reportGuestIncident = (body: {
+export type GuestIncidentRequest = {
   lockerCode: string;
   type: GuestIncidentType;
   title: string;
   description: string;
   deliveryRequestId?: string;
   returnRequestId?: string;
-}) =>
+};
+
+export const reportGuestIncident = (body: GuestIncidentRequest, guestSessionToken?: string) =>
   request<GuestIncident>("/backend/incidents/guest", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(guestSessionToken ? { "X-Guest-Session-Token": guestSessionToken } : {}) },
     body: JSON.stringify(body),
   });
 
