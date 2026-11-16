@@ -47,7 +47,6 @@ import {
   openReturnPickup,
   reportGuestIncident,
   reserveCompartment,
-  resolveRecipient,
   scanWaybill,
   submitDelivery,
   uploadParcelFile,
@@ -55,6 +54,7 @@ import {
 } from "./delivery-api";
 import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
 import { LockerSupport } from "./locker-support";
+import { useRecipientVerification } from "./use-recipient-verification";
 
 type Screen =
   | "welcome"
@@ -93,13 +93,11 @@ const INCIDENT_DESCRIPTION_MIN = 10;
 const INCIDENT_DESCRIPTION_MAX = 4000;
 
 const DRAFT_STORAGE_KEY = "boxora.delivery.draft";
-const PHONE_PATTERN = /^0\d{9}$/;
 const OCR_NOTICES = {
   success: "Quét vận đơn thành công. Vui lòng kiểm tra lại số điện thoại người nhận.",
   failed: "Quét vận đơn thất bại. Vui lòng nhập số điện thoại người nhận thủ công.",
   masked: "Vận đơn đã che bớt số điện thoại. Vui lòng nhập đầy đủ số điện thoại người nhận.",
 } as const;
-type RecipientStatus = "idle" | "loading" | "found" | "not-found" | "cannot-receive" | "limit" | "error";
 type ScanStatus = "idle" | "scanning" | "ready" | "error";
 
 const LOCKER_CODE_PATTERN = /^[A-Za-z0-9_-]{2,32}$/;
@@ -454,9 +452,6 @@ export function DeliveryFlow() {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [lockerCode, setLockerCode] = useState("");
   const [phone, setPhone] = useState("");
-  const [recipientName, setRecipientName] = useState("");
-  const [recipientStatus, setRecipientStatus] = useState<RecipientStatus>("idle");
-  const [recipientMessage, setRecipientMessage] = useState("");
   const [lookupTick, setLookupTick] = useState(0);
   const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
   const [ocrNotice, setOcrNotice] = useState<"" | keyof typeof OCR_NOTICES>("");
@@ -513,14 +508,18 @@ export function DeliveryFlow() {
   const sessionPromise = useRef<Promise<DeliverySession> | null>(null);
   const phoneTouched = useRef(false);
   const scanRun = useRef(0);
-  const lookupRun = useRef(0);
+  const sendPending = useRef(false);
   // Set only when the OCR quota is used up and the photo was stored through the plain image upload instead.
   const fallbackImageUrl = useRef<string | null>(null);
 
+  const { status: recipientStatus, name: recipientName, message: recipientMessage, invalidate: invalidateRecipient, isVerified } =
+    useRecipientVerification(phone, deliverySession, screen === "recipient", scanStatus === "ready", lookupTick);
+
   const storeSession = useCallback((session: DeliverySession | null) => {
+    invalidateRecipient();
     deliverySessionRef.current = session;
     setDeliverySession(session);
-  }, []);
+  }, [invalidateRecipient]);
 
   const clearDraft = useCallback(() => {
     window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
@@ -692,45 +691,6 @@ export function DeliveryFlow() {
     window.sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ lockerCode, session: deliverySession, phone, screen }));
   }, [deliverySession, lockerCode, phone, screen]);
 
-  // Looks the recipient up once a full number is present, so the Shipper can compare the name with the waybill.
-  useEffect(() => {
-    if (screen !== "recipient") return;
-    const digits = phoneDigits(phone);
-    const run = ++lookupRun.current;
-    const timer = window.setTimeout(async () => {
-      if (!PHONE_PATTERN.test(digits)) {
-        setRecipientStatus("idle");
-        setRecipientName("");
-        setRecipientMessage("");
-        return;
-      }
-      const session = deliverySessionRef.current;
-      if (!session || (scanStatus !== "ready" && !fallbackImageUrl.current)) return;
-      setRecipientStatus("loading");
-      setRecipientName("");
-      try {
-        const result = await resolveRecipient(session.id, session.guestSessionToken, digits);
-        if (run !== lookupRun.current) return;
-        setRecipientName(result.fullName);
-        setRecipientStatus("found");
-      } catch (error) {
-        if (run !== lookupRun.current) return;
-        setRecipientName("");
-        if (error instanceof DeliveryApiError && error.code === "delivery/recipient_not_found") {
-          setRecipientStatus("not-found");
-        } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
-          setRecipientStatus("cannot-receive");
-        } else if (error instanceof DeliveryApiError && error.code === "delivery/lookup_limit_reached") {
-          setRecipientStatus("limit");
-        } else {
-          setRecipientStatus("error");
-          setRecipientMessage(error instanceof Error ? error.message : "Không thể tra cứu người nhận.");
-        }
-      }
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [phone, scanStatus, screen, lookupTick]);
-
   useEffect(() => {
     if (!imageUrl?.startsWith("blob:")) return;
     return () => URL.revokeObjectURL(imageUrl);
@@ -800,13 +760,10 @@ export function DeliveryFlow() {
     setPhone("");
     phoneTouched.current = false;
     scanRun.current += 1;
-    lookupRun.current += 1;
+    invalidateRecipient();
     fallbackImageUrl.current = null;
     sessionPromise.current = null;
     clearDraft();
-    setRecipientName("");
-    setRecipientStatus("idle");
-    setRecipientMessage("");
     setScanStatus("idle");
     setOcrNotice("");
     setOcrPhones([]);
@@ -973,6 +930,7 @@ export function DeliveryFlow() {
   };
 
   const runScan = async (file: File) => {
+    invalidateRecipient();
     const run = ++scanRun.current;
     fallbackImageUrl.current = null;
     setScanStatus("scanning");
@@ -1001,7 +959,10 @@ export function DeliveryFlow() {
       } else if (result.status === "Succeeded" && result.phones.length > 0) {
         setOcrNotice("success");
         setOcrPhones(result.phones);
-        if (!phoneTouched.current) setPhone(formatPhone(result.phones[0]));
+        if (!phoneTouched.current) {
+          invalidateRecipient();
+          setPhone(formatPhone(result.phones[0]));
+        }
       } else {
         setOcrNotice("failed");
       }
@@ -1044,17 +1005,21 @@ export function DeliveryFlow() {
 
   const changePhone = (value: string) => {
     phoneTouched.current = true;
+    invalidateRecipient();
     setPhone(normalizePhoneInput(value));
+    setLookupTick((tick) => tick + 1);
   };
 
   const sendDeliveryRequest = async () => {
     const session = deliverySessionRef.current;
-    if (!session || recipientStatus !== "found") {
+    if (sendPending.current) return;
+    if (!session || recipientStatus !== "found" || scanStatus !== "ready" || !isVerified(session, phone)) {
       setApiError("Chưa xác nhận được người nhận. Vui lòng kiểm tra lại số điện thoại.");
       return;
     }
 
     setApiError("");
+    sendPending.current = true;
     setIsSendingRequest(true);
     try {
       await submitDelivery(session.id, session.guestSessionToken, fallbackImageUrl.current, phoneDigits(phone));
@@ -1070,12 +1035,12 @@ export function DeliveryFlow() {
       if (error instanceof DeliveryApiError && error.status === 404) {
         setScreen("not-found");
       } else if (error instanceof DeliveryApiError && error.code === "delivery/recipient_cannot_receive") {
-        setRecipientStatus("cannot-receive");
-        setRecipientName("");
+        invalidateRecipient("cannot-receive");
       } else {
         setApiError(error instanceof Error ? error.message : "Không thể gửi yêu cầu giao hàng.");
       }
     } finally {
+      sendPending.current = false;
       setIsSendingRequest(false);
     }
   };
@@ -1450,7 +1415,7 @@ export function DeliveryFlow() {
 
       case "recipient": {
         const digits = phoneDigits(phone);
-        const canSend = recipientStatus === "found" && scanStatus === "ready" && !isSendingRequest;
+        const canSend = recipientStatus === "found" && isVerified(deliverySession, phone) && scanStatus === "ready" && !isSendingRequest;
         return (
           <div className="flex flex-1 flex-col">
             <div className="mb-4">
