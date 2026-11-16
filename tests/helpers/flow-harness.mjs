@@ -15,7 +15,11 @@ export class DeliveryApiError extends Error {
 // Execute the production hook with deterministic effects/timers and controlled API outcomes.
 // No source matching, snapshots, dependencies or live server are needed.
 export function harness(flow = false, options = {}) {
-  const slots = [], effects = [], timers = new Map(), calls = [];
+  const slots = [], effects = [], timers = new Map(), calls = [], listeners = new Map();
+  const events = {
+    addEventListener(name, callback) { if (!listeners.has(name)) listeners.set(name, new Set()); listeners.get(name).add(callback); },
+    removeEventListener(name, callback) { listeners.get(name)?.delete(callback); },
+  };
   let cursor = 0, nextTimer = 0, result, queued = false, mounted = true;
   const submits = [];
   let args = ['0901234567', session(), true, true, 0];
@@ -59,6 +63,7 @@ export function harness(flow = false, options = {}) {
     resolveRecipient(...request) { const response = deferred(); calls.push({ request, response }); return response.promise; },
     scanWaybill: async () => ({ status: 'Succeeded', phones: ['0901234567', '0909999999'], isMasked: false }),
     submitDelivery(...request) { const response = deferred(); submits.push({ request, response }); return response.promise; },
+    ...options.api,
   };
   const data = new Map([['boxora.delivery.draft', JSON.stringify({ lockerCode: 'LKR-A', session: { ...session(), sessionExpiresAt: '2099-01-01' } })]]);
   const card = Object.assign(() => {}, { Content: 'Card.Content' });
@@ -70,16 +75,19 @@ export function harness(flow = false, options = {}) {
     process: { env: { NODE_ENV: 'development' } },
     createImageBitmap: async () => ({ width: 100, height: 100, close() {} }),
     File: class { constructor(_parts, name) { this.name = name; } },
+    navigator: { onLine: true },
     document: {
+      visibilityState: options.visible ? 'visible' : 'hidden',
       createElement: () => ({ getContext: () => ({ drawImage() {} }), toBlob: callback => callback({}) }),
-      addEventListener() {}, removeEventListener() {},
+      ...events,
     },
     window: {
       location: { search: options.search ?? '?locker=LKR-A' },
       sessionStorage: { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value), removeItem: key => data.delete(key) },
       setTimeout(fn) { const i = ++nextTimer; timers.set(i, fn); return i; },
       clearTimeout(i) { timers.delete(i); },
-      addEventListener() {}, removeEventListener() {},
+      setInterval() { return ++nextTimer; }, clearInterval() {},
+      ...events,
     },
     URLSearchParams,
     require(name) {
@@ -115,6 +123,9 @@ export function harness(flow = false, options = {}) {
   render();
   return {
     calls, submits, incidents,
+    get draft() { return data.get('boxora.delivery.draft'); },
+    get timerCount() { return timers.size; },
+    dispatch(name) { for (const callback of [...(listeners.get(name) ?? [])]) callback(); },
     text: () => text(result),
     find: type => nodes(result).filter(node => node.type === type || node.type?.name === type),
     button: label => nodes(result).find(node => node.type === 'Button' && text(node).includes(label)),
