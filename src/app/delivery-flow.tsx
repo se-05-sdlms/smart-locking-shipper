@@ -54,6 +54,7 @@ import {
 } from "./delivery-api";
 import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
 import { LockerSupport } from "./locker-support";
+import { createSessionGenerationGate } from "./session-generation";
 import { useRecipientVerification } from "./use-recipient-verification";
 
 type Screen =
@@ -515,7 +516,6 @@ export function DeliveryFlow() {
   const fileInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
   const deliverySessionRef = useRef<DeliverySession | null>(null);
-  const sessionPromise = useRef<Promise<DeliverySession> | null>(null);
   const phoneTouched = useRef(false);
   const scanRun = useRef(0);
   const sendPending = useRef(false);
@@ -530,6 +530,7 @@ export function DeliveryFlow() {
     deliverySessionRef.current = session;
     setDeliverySession(session);
   }, [invalidateRecipient]);
+  const sessionGate = useRef(createSessionGenerationGate<DeliverySession>());
 
   const clearDraft = useCallback(() => {
     window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
@@ -821,6 +822,7 @@ export function DeliveryFlow() {
   }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    sessionGate.current?.reset();
     openAttemptSession.current = null;
     reconciledDoorDeadline.current = null;
     setUnavailableDeliveryId("");
@@ -837,7 +839,6 @@ export function DeliveryFlow() {
     scanRun.current += 1;
     invalidateRecipient();
     fallbackImageUrl.current = null;
-    sessionPromise.current = null;
     clearDraft();
     setScanStatus("idle");
     setOcrNotice("");
@@ -997,17 +998,7 @@ export function DeliveryFlow() {
   // The session is created in the background so the camera can open straight from the tap.
   const ensureSession = (): Promise<DeliverySession> => {
     if (deliverySessionRef.current) return Promise.resolve(deliverySessionRef.current);
-    if (!sessionPromise.current) {
-      sessionPromise.current = initiateDelivery(lockerCode)
-        .then((session) => {
-          storeSession(session);
-          return session;
-        })
-        .finally(() => {
-          sessionPromise.current = null;
-        });
-    }
-    return sessionPromise.current;
+    return sessionGate.current.ensure(() => initiateDelivery(lockerCode), (session) => storeSession(session));
   };
 
   const beginSend = () => {

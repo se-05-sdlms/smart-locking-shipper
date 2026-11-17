@@ -12,6 +12,34 @@ export class DeliveryApiError extends Error {
   constructor(message, status, code) { super(message); this.status = status; this.code = code; }
 }
 
+const sessionGenerationModule = {
+  createSessionGenerationGate(start, commit) {
+    let generation = 0;
+    let pending = null;
+    return {
+      ensure(start, commit) {
+        if (pending) return pending;
+        const owner = generation;
+        const request = start()
+          .then(value => {
+            if (owner !== generation) throw new Error('Delivery session request was superseded.');
+            commit(value);
+            return value;
+          })
+          .finally(() => {
+            if (owner === generation) pending = null;
+          });
+        pending = request;
+        return request;
+      },
+      reset() {
+        generation += 1;
+        pending = null;
+      },
+    };
+  },
+};
+
 // Execute the production hook with deterministic effects/timers and controlled API outcomes.
 // No source matching, snapshots, dependencies or live server are needed.
 export function harness(flow = false, options = {}) {
@@ -96,6 +124,7 @@ export function harness(flow = false, options = {}) {
     require(name) {
       if (name === 'react') return react;
       if (name === './delivery-api') return api;
+      if (name === './session-generation') return sessionGenerationModule;
       if (name === './use-recipient-verification') return hook;
       if (name === 'react/jsx-runtime') return { jsx: tag, jsxs: tag, Fragment: 'Fragment' };
       if (name === '@heroui/react' || name === '@gravity-ui/icons') return ui;
