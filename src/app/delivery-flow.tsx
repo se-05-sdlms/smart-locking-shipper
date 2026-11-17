@@ -516,7 +516,6 @@ export function DeliveryFlow() {
   const fileInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
   const deliverySessionRef = useRef<DeliverySession | null>(null);
-  const lockerCodeRef = useRef("");
   const phoneTouched = useRef(false);
   const scanRun = useRef(0);
   const sendPending = useRef(false);
@@ -531,14 +530,7 @@ export function DeliveryFlow() {
     deliverySessionRef.current = session;
     setDeliverySession(session);
   }, [invalidateRecipient]);
-  lockerCodeRef.current = lockerCode;
-  const sessionGate = useRef<ReturnType<typeof createSessionGenerationGate<DeliverySession>> | null>(null);
-  if (!sessionGate.current) {
-    sessionGate.current = createSessionGenerationGate(
-      () => initiateDelivery(lockerCodeRef.current),
-      (session) => storeSession(session),
-    );
-  }
+  const sessionGate = useRef(createSessionGenerationGate<DeliverySession>());
 
   const clearDraft = useCallback(() => {
     window.sessionStorage.removeItem(DRAFT_STORAGE_KEY);
@@ -1006,7 +998,7 @@ export function DeliveryFlow() {
   // The session is created in the background so the camera can open straight from the tap.
   const ensureSession = (): Promise<DeliverySession> => {
     if (deliverySessionRef.current) return Promise.resolve(deliverySessionRef.current);
-    return sessionGate.current!.ensure();
+    return sessionGate.current.ensure(() => initiateDelivery(lockerCode), (session) => storeSession(session));
   };
 
   const beginSend = () => {

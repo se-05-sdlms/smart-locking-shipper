@@ -17,7 +17,7 @@ const sessionGenerationModule = {
     let generation = 0;
     let pending = null;
     return {
-      ensure() {
+      ensure(start, commit) {
         if (pending) return pending;
         const owner = generation;
         const request = start()

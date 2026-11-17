@@ -1,12 +1,10 @@
 export function createSessionGenerationGate<T>(
-  start: () => Promise<T>,
-  commit: (value: T) => void,
 ) {
   let generation = 0;
   let pending: Promise<T> | null = null;
 
   return {
-    ensure(): Promise<T> {
+    ensure(start: () => Promise<T>, commit: (value: T) => void): Promise<T> {
       if (pending) return pending;
       const owner = generation;
       const request = start()
