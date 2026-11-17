@@ -6,16 +6,23 @@ import vm from 'node:vm';
 import { harness, DeliveryApiError } from './helpers/flow-harness.mjs';
 const ts = createRequire(import.meta.url)('typescript');
 
-function apiHarness(status = 200) {
+function apiHarness(status = 200, apiBaseUrl) {
   const calls = [], compiled = { exports: {} };
   vm.runInNewContext(ts.transpileModule(readFileSync(new URL('../src/app/delivery-api.ts', import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText, {
     module: compiled, exports: compiled.exports, Error,
+    process: { env: { NEXT_PUBLIC_API_BASE_URL: apiBaseUrl } },
     fetch: async (...args) => { calls.push(args); return { ok: status < 400, status, json: async () => status < 400 ? { referenceCode: 'INC-TEST' } : { message: 'Rejected session' } }; },
   });
   return { api: compiled.exports, calls };
 }
+test('guest incident API uses the configured Pages backend', async () => {
+  const h = apiHarness(200, 'https://api.example.test/api/');
+  await h.api.reportGuestIncident({ lockerCode: 'LKR-A' });
+  assert.equal(h.calls[0][0], 'https://api.example.test/api/incidents/guest');
+});
+
 for (const [id, token] of [['deliveryRequestId', 'delivery-A'], ['returnRequestId', 'pickup-B'], [null, undefined]]) {
   test(`actual guest incident API sends ${id ?? 'anonymous'} identity and header`, async () => {
     const h = apiHarness();

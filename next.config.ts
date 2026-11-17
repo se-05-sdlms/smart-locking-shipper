@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {
+const nextConfig: NextConfig = process.env.NEXT_PUBLIC_API_BASE_URL ? {
+  output: "export",
+  images: { unoptimized: true },
+} : {
   async rewrites() {
     return [
       {
