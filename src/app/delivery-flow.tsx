@@ -516,6 +516,8 @@ export function DeliveryFlow() {
   const galleryInput = useRef<HTMLInputElement>(null);
   const deliverySessionRef = useRef<DeliverySession | null>(null);
   const sessionPromise = useRef<Promise<DeliverySession> | null>(null);
+  // Invalidated whenever the flow is reset so a late response cannot resurrect an old session.
+  const sessionGeneration = useRef(0);
   const phoneTouched = useRef(false);
   const scanRun = useRef(0);
   const sendPending = useRef(false);
@@ -821,6 +823,7 @@ export function DeliveryFlow() {
   }, [clearPickupAccess, pickupSession, screen]);
 
   const reset = () => {
+    sessionGeneration.current += 1;
     openAttemptSession.current = null;
     reconciledDoorDeadline.current = null;
     setUnavailableDeliveryId("");
@@ -998,14 +1001,19 @@ export function DeliveryFlow() {
   const ensureSession = (): Promise<DeliverySession> => {
     if (deliverySessionRef.current) return Promise.resolve(deliverySessionRef.current);
     if (!sessionPromise.current) {
-      sessionPromise.current = initiateDelivery(lockerCode)
+      const generation = sessionGeneration.current;
+      const pending = initiateDelivery(lockerCode)
         .then((session) => {
+          if (generation !== sessionGeneration.current) {
+            throw new Error("Delivery session request was superseded.");
+          }
           storeSession(session);
           return session;
         })
         .finally(() => {
-          sessionPromise.current = null;
+          if (generation === sessionGeneration.current) sessionPromise.current = null;
         });
+      sessionPromise.current = pending;
     }
     return sessionPromise.current;
   };
