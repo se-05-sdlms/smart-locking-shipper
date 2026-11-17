@@ -6,11 +6,11 @@ import vm from 'node:vm';
 
 const ts = createRequire(import.meta.url)('typescript');
 const source = readFileSync(new URL('../src/app/session-generation.ts', import.meta.url), 'utf8');
-const module = { exports: {} };
+const compiledModule = { exports: {} };
 vm.runInNewContext(ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-}).outputText, { module, exports: module.exports });
-const { createSessionGenerationGate } = module.exports;
+}).outputText, { module: compiledModule, exports: compiledModule.exports });
+const { createSessionGenerationGate } = compiledModule.exports;
 
 test('stale resolve after reset cannot commit over the new session', async () => {
   const old = Promise.withResolvers();
