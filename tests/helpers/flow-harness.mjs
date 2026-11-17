@@ -13,7 +13,7 @@ export class DeliveryApiError extends Error {
 }
 
 const sessionGenerationModule = {
-  createSessionGenerationGate(start, commit) {
+  createSessionGenerationGate() {
     let generation = 0;
     let pending = null;
     return {
