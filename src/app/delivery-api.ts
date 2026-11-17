@@ -52,8 +52,14 @@ export class DeliveryApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/+$/, "") || "/backend";
+
+export function getApiUrl(path: string) {
+  return `${apiBaseUrl}${path}`;
+}
+
+async function request<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(getApiUrl(path), init);
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -68,7 +74,7 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 export const initiateDelivery = (lockerCode: string) =>
-  request<DeliverySession>("/backend/delivery-requests", {
+  request<DeliverySession>("/delivery-requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ lockerCode }),
@@ -78,7 +84,7 @@ export async function uploadParcelFile(file: File): Promise<string> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const result = await request<{ url: string }>("/backend/images", {
+  const result = await request<{ url: string }>("/images", {
     method: "POST",
     body: formData,
   });
@@ -99,7 +105,7 @@ export async function scanWaybill(requestId: string, guestSessionToken: string, 
   const formData = new FormData();
   formData.append("file", file);
 
-  return request<WaybillOcrResult>(`/backend/delivery-requests/${requestId}:waybill-ocr`, {
+  return request<WaybillOcrResult>(`/delivery-requests/${requestId}:waybill-ocr`, {
     method: "POST",
     headers: { "X-Guest-Session-Token": guestSessionToken },
     body: formData,
@@ -107,7 +113,7 @@ export async function scanWaybill(requestId: string, guestSessionToken: string, 
 }
 
 export const resolveRecipient = (requestId: string, guestSessionToken: string, phone: string) =>
-  request<{ fullName: string }>(`/backend/delivery-requests/${requestId}:resolve-recipient`, {
+  request<{ fullName: string }>(`/delivery-requests/${requestId}:resolve-recipient`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -123,7 +129,7 @@ export const submitDelivery = (
   parcelImageUrl: string | null,
   recipientPhone: string,
 ) =>
-  request<DeliverySummary>(`/backend/delivery-requests/${requestId}:submit`, {
+  request<DeliverySummary>(`/delivery-requests/${requestId}:submit`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -133,30 +139,30 @@ export const submitDelivery = (
   });
 
 export const getDeliveryStatus = (requestId: string, guestSessionToken: string) =>
-  request<GuestDeliveryStatus>(`/backend/delivery-requests/${requestId}`, {
+  request<GuestDeliveryStatus>(`/delivery-requests/${requestId}`, {
     method: "GET",
     headers: { "X-Guest-Session-Token": guestSessionToken },
   });
 
 export const cancelDelivery = (requestId: string, guestSessionToken: string) =>
-  request<DeliverySummary>(`/backend/delivery-requests/${requestId}:cancel`, {
+  request<DeliverySummary>(`/delivery-requests/${requestId}:cancel`, {
     method: "POST",
     headers: { "X-Guest-Session-Token": guestSessionToken },
   });
 
 export const reserveCompartment = (requestId: string, guestSessionToken: string) =>
-  request<CompartmentReservation>(`/backend/delivery-requests/${requestId}:openCompartment`, {
+  request<CompartmentReservation>(`/delivery-requests/${requestId}:openCompartment`, {
     method: "POST",
     headers: { "X-Guest-Session-Token": guestSessionToken },
   });
 
 export const validateReturnPickup = (lockerCode: string, pickupCode: string) =>
-  request<ReturnPickupSession>("/backend/return-pickup-sessions", {
+  request<ReturnPickupSession>("/return-pickup-sessions", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lockerCode, pickupCode }),
   });
 
 export const openReturnPickup = (session: ReturnPickupSession) =>
-  request<ReturnPickupSession>(`/backend/return-pickup-sessions/${session.returnRequestId}:openCompartment`, {
+  request<ReturnPickupSession>(`/return-pickup-sessions/${session.returnRequestId}:openCompartment`, {
     method: "POST", headers: { "X-Guest-Session-Token": session.guestSessionToken },
   });
 
@@ -180,13 +186,13 @@ export type GuestIncidentRequest = {
 };
 
 export const reportGuestIncident = (body: GuestIncidentRequest, guestSessionToken?: string) =>
-  request<GuestIncident>("/backend/incidents/guest", {
+  request<GuestIncident>("/incidents/guest", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(guestSessionToken ? { "X-Guest-Session-Token": guestSessionToken } : {}) },
     body: JSON.stringify(body),
   });
 
 export const getReturnPickup = (session: ReturnPickupSession) =>
-  request<ReturnPickupSession>(`/backend/return-pickup-sessions/${session.returnRequestId}`, {
+  request<ReturnPickupSession>(`/return-pickup-sessions/${session.returnRequestId}`, {
     method: "GET", headers: { "X-Guest-Session-Token": session.guestSessionToken },
   });

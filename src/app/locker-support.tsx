@@ -3,6 +3,7 @@
 import { Button } from "@heroui/react";
 import { Handset } from "@gravity-ui/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getApiUrl } from "./delivery-api";
 
 type SupportContact = {
   lockerCode: string;
@@ -28,7 +29,7 @@ export function LockerSupport({ lockerCode, reference }: { lockerCode: string; r
     setContact(null);
     setMessage("");
     try {
-      const response = await fetch(`/backend/lockers/public/by-code/${encodeURIComponent(lockerCode)}/support`, { cache: "no-store" });
+      const response = await fetch(getApiUrl(`/lockers/public/by-code/${encodeURIComponent(lockerCode)}/support`), { cache: "no-store" });
       if (!response.ok) throw new Error("Chưa tải được liên hệ. Vui lòng thử lại hoặc làm theo hướng dẫn tại tủ.");
       const result = await response.json() as SupportContact;
       if (request !== generation.current) return null;
