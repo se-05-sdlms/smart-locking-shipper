@@ -39,6 +39,19 @@ const sessionGenerationModule = {
     };
   },
 };
+const waybillValidationModule = {
+  MAX_WAYBILL_IMAGE_BYTES: 5 * 1024 * 1024,
+  validateWaybillFile(file) {
+    if (!file) return { valid: false, message: "Chỉ hỗ trợ ảnh JPEG hoặc PNG." };
+    const type = file.type?.toLowerCase().trim();
+    const extension = file.name?.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+    const supportedType = type === "image/jpeg" || type === "image/png";
+    const supportedExtension = extension === "jpg" || extension === "jpeg" || extension === "png";
+    if ((type && !supportedType) || (!type && !supportedExtension)) return { valid: false, message: "Chỉ hỗ trợ ảnh JPEG hoặc PNG." };
+    if (typeof file.size === "number" && file.size > waybillValidationModule.MAX_WAYBILL_IMAGE_BYTES) return { valid: false, message: "Ảnh không được vượt quá 5 MB." };
+    return { valid: true };
+  },
+};
 
 // Execute the production hook with deterministic effects/timers and controlled API outcomes.
 // No source matching, snapshots, dependencies or live server are needed.
@@ -125,6 +138,7 @@ export function harness(flow = false, options = {}) {
       if (name === 'react') return react;
       if (name === './delivery-api') return api;
       if (name === './session-generation') return sessionGenerationModule;
+      if (name === './waybill-validation') return waybillValidationModule;
       if (name === './use-recipient-verification') return hook;
       if (name === 'react/jsx-runtime') return { jsx: tag, jsxs: tag, Fragment: 'Fragment' };
       if (name === '@heroui/react' || name === '@gravity-ui/icons') return ui;

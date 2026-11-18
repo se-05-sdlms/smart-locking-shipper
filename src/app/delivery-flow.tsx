@@ -54,6 +54,7 @@ import {
 } from "./delivery-api";
 import type { DeliverySession, GuestIncidentType, ReturnPickupSession } from "./delivery-api";
 import { LockerSupport } from "./locker-support";
+import { MAX_WAYBILL_IMAGE_BYTES, validateWaybillFile } from "./waybill-validation";
 import { createSessionGenerationGate } from "./session-generation";
 import { useRecipientVerification } from "./use-recipient-verification";
 
@@ -244,7 +245,9 @@ async function prepareParcelImage(file: File) {
     );
   });
   const filename = file.name.replace(/\.[^.]+$/, "") || "kien-hang";
-  return new File([blob], `${filename}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  const prepared = new File([blob], `${filename}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  if (prepared.size > MAX_WAYBILL_IMAGE_BYTES) throw new Error("Ảnh không được vượt quá 5 MB.");
+  return prepared;
 }
 
 function AppHeader({ isBackDisabled = false, lockerCode, goBack }: { isBackDisabled?: boolean; lockerCode: string; goBack: () => void }) {
@@ -1070,6 +1073,11 @@ export function DeliveryFlow() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    const validation = validateWaybillFile(file);
+    if (!validation.valid) {
+      setApiError(validation.message ?? "Ảnh không hợp lệ.");
+      return;
+    }
     try {
       const prepared = await prepareParcelImage(file);
       setImageFile(prepared);
@@ -1078,7 +1086,11 @@ export function DeliveryFlow() {
       setScreen("recipient");
       void runScan(prepared);
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Không thể xử lý ảnh kiện hàng.");
+      setApiError(
+        error instanceof Error && error.message === "Ảnh không được vượt quá 5 MB."
+          ? error.message
+          : "Ảnh không hợp lệ hoặc bị hỏng. Vui lòng chọn ảnh JPEG hoặc PNG khác.",
+      );
     }
   };
 
