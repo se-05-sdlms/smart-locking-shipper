@@ -1085,8 +1085,12 @@ export function DeliveryFlow() {
       setApiError("");
       setScreen("recipient");
       void runScan(prepared);
-    } catch {
-      setApiError("Ảnh không hợp lệ hoặc bị hỏng. Vui lòng chọn ảnh JPEG hoặc PNG khác.");
+    } catch (error) {
+      setApiError(
+        error instanceof Error && error.message === "Ảnh không được vượt quá 5 MB."
+          ? error.message
+          : "Ảnh không hợp lệ hoặc bị hỏng. Vui lòng chọn ảnh JPEG hoặc PNG khác.",
+      );
     }
   };
 
